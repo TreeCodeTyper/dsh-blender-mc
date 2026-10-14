@@ -26,26 +26,26 @@
 
 ### 0. 先搜一下，别重复劳动
 
-- [已有的 Issue](https://github.com/你的用户名/dsh-blender-mc/issues)
-- [已有的 PR](https://github.com/你的用户名/dsh-blender-mc/pulls)
+- [已有的 Issue](https://github.com/TreeCodeTyper/dsh-blender-mc/issues)
+- [已有的 PR](https://github.com/TreeCodeTyper/dsh-blender-mc/pulls)
 
 **大改动请先开 Issue 讨论**，别写完 500 行才说 —— 万一方向不对，你的时间就白费了。
 
 ### 1. Fork 本仓库
 
-点右上角的 **Fork** 按钮，得到 `https://github.com/<你的用户名>/dsh-blender-mc`。
+点右上角的 **Fork** 按钮，得到 `https://github.com/<你的 GitHub 用户名>/dsh-blender-mc`。
 
 ### 2. 克隆**你自己的 fork**（不是源仓库）
 
 ```bash
-git clone https://github.com/<你的用户名>/dsh-blender-mc.git
+git clone https://github.com/<你的 GitHub 用户名>/dsh-blender-mc.git
 cd dsh-blender-mc
 ```
 
 顺手把源仓库加成远端，方便后面同步：
 
 ```bash
-git remote add upstream https://github.com/你的用户名/dsh-blender-mc.git
+git remote add upstream https://github.com/TreeCodeTyper/dsh-blender-mc.git
 ```
 
 ### 3. 建分支
@@ -351,7 +351,7 @@ python py/cli.py scan <存档> --area x0,x1,z0,z1
 
 <div align="center">
 
-**有疑问？** 开个 [Discussion](https://github.com/你的用户名/dsh-blender-mc/discussions) 或 Issue，别憋着。
+**有疑问？** 开个 [Discussion](https://github.com/TreeCodeTyper/dsh-blender-mc/discussions) 或 Issue，别憋着。
 
 [← 回 README](README.md) · [使用教程 →](docs/使用教程.md)
 

@@ -102,7 +102,7 @@ pip install opencv-python numpy
 Then either install from the DSH plugin marketplace, or:
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/dsh-blender-mc.git
+git clone https://github.com/TreeCodeTyper/dsh-blender-mc.git
 cd dsh-blender-mc
 python py/cli.py doctor            # check what's missing
 python py/cli.py setup --dry-run   # see what assets would be assembled
@@ -135,7 +135,7 @@ translation is a very welcome contribution).
 The short version:
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/dsh-blender-mc.git   # your fork
+git clone https://github.com/<your-github-username>/dsh-blender-mc.git   # your fork
 git checkout -b feat/your-feature
 # ... edit ...
 python py/cli.py doctor && node scripts/smoke.mjs

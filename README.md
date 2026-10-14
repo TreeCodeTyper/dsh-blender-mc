@@ -121,7 +121,7 @@ DSH → 设置 → 插件市场 → 搜索 `dsh-blender-mc` → 安装 → **开
 **方式 B：从源码装**
 
 ```bash
-git clone https://github.com/你的用户名/dsh-blender-mc.git
+git clone https://github.com/TreeCodeTyper/dsh-blender-mc.git
 cd dsh-blender-mc
 python py/cli.py doctor        # 先看看缺什么
 ```
@@ -326,7 +326,7 @@ MC 素材是 Mojang 的），各有各的许可，再分发不合适。
 
 ```bash
 # 1. 先 fork，再克隆你自己的 fork
-git clone https://github.com/<你的用户名>/dsh-blender-mc.git
+git clone https://github.com/<你的 GitHub 用户名>/dsh-blender-mc.git
 cd dsh-blender-mc
 
 # 2. 建分支（不要直接在 main 上改）

@@ -87,5 +87,5 @@
 | 64 | 审图判朝向只取顶部 **22%**（MC 角色头只占身高 25%），取 35% 会把手臂算进来 |
 | 65 | 扫描的提前退出判据必须覆盖**所有**资产种类，否则漏掉后面的目录 |
 
-[Unreleased]: https://github.com/你的用户名/dsh-blender-mc/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/你的用户名/dsh-blender-mc/releases/tag/v0.1.0
+[Unreleased]: https://github.com/TreeCodeTyper/dsh-blender-mc/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/TreeCodeTyper/dsh-blender-mc/releases/tag/v0.1.0
