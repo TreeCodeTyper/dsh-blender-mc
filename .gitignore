@@ -1,0 +1,30 @@
+# 构建产物与本地资产 —— 都不该进版本库
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.DS_Store
+Thumbs.db
+
+# ★ vendor/ 是从用户本地资源目录"装配"出来的第三方资产
+#   （BPS 骨架、物品库等），**绝不能提交**：
+#     ① 版权不属于本项目，再分发不合适
+#     ② 16 MB 的二进制会让仓库变得很重
+#   别人克隆后跑 `python py/cli.py setup` 自己装配即可。
+vendor/
+
+# 出图/出片的产物
+out/
+出图/
+动画/
+*.mp4
+*.gif
+frame_*.png
+preview_*.png
+*.blend1
+
+# 本地配置
+.env
+.env.local
+*.local.yml
+node_modules/

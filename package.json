@@ -1,0 +1,67 @@
+{
+  "name": "dsh-blender-mc",
+  "version": "0.1.0",
+  "description": "Minecraft 存档 → Blender 封面 / 动画。自动找机位、导出几何、搭场景、渲染，并用 OpenCV 自动审图（渲完自己检查朝向 / 接地 / 曝光 / 布光 / 构图，不合格自动调参重渲）。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": { "default": "./lib/index.js" },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "engines": { "node": ">=20" },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "manifestVersion": 1
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/你的用户名/dsh-blender-mc"
+  },
+  "homepage": "https://github.com/你的用户名/dsh-blender-mc#readme",
+  "bugs": {
+    "url": "https://github.com/你的用户名/dsh-blender-mc/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh-subprocess": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.2.0-rc.2"
+  },
+  "files": [
+    "lib",
+    "py",
+    "docs",
+    "cordis.patch.yml",
+    "README.md",
+    "README.en.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "icon.svg"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "minecraft",
+    "blender",
+    "opencv",
+    "computer-vision",
+    "animation",
+    "render",
+    "anvil",
+    "mcprep",
+    "3d"
+  ],
+  "license": "MIT",
+  "icon": "./icon.svg",
+  "scripts": {
+    "doctor": "python py/cli.py doctor",
+    "setup": "python py/cli.py setup",
+    "check": "python py/cli.py check",
+    "smoke": "node scripts/smoke.mjs"
+  }
+}

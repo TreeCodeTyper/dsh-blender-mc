@@ -1,0 +1,37 @@
+# dsh-blender-mc 组合包补丁（bundle patch）
+#
+# ⚠️ 这个文件是【插件自带的】补丁，作用是：当本包被列进 profile 的
+#    dsh.profile.bundles 时，把插件行【插入】加载器。
+#    格式必须是 `- insert:` 列表 —— 只写 config 块的话插件不会加载。
+#
+# 用户要改配置，请改【自己 profile 的 cordis.patch.yml】里同 id 那一行
+# （覆盖 config 即可），不要改这个文件。
+#
+# 用户 profile 的 cordis.patch.yml 示例：
+#
+#   - id: blender-mc
+#     name: 'dsh-blender-mc'
+#     config:
+#       python: 'C:\Python314\python.exe'
+#       blender: 'D:\SteamLibrary\steamapps\common\Blender\blender.exe'
+#       rig: ''            # 留空则自动：vendor/ → 现场扫描
+#       item_rig: ''
+#       textures: ''
+#       ffmpeg: ''
+#
+# 上面这些【全都可以留空】—— 留空时插件按
+#     显式配置 > vendor/manifest.json > 现场扫描
+# 的顺序自己找。跑一次 `python py/cli.py setup` 就能把资产装好。
+- insert:
+    - id: blender-mc
+      name: 'dsh-blender-mc'
+      config:
+        # 全都留空也能用；填了则优先用填的
+        python: ''
+        blender: ''
+        rig: ''
+        item_rig: ''
+        textures: ''
+        ffmpeg: ''
+        # 单次渲染超时（建场景 + 渲染）
+        renderTimeoutMs: 1800000

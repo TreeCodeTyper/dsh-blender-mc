@@ -1,0 +1,160 @@
+name: CI
+
+# 只在 PR 和推送到 main 时跑 —— 别浪费 runner 时间
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  # ──────────────────────────────────────────────────
+  # 1. 插件外壳冒烟测试（不需要 Blender，秒级完成）
+  # ──────────────────────────────────────────────────
+  smoke:
+    name: 插件外壳
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 冒烟测试
+        run: node scripts/smoke.mjs
+
+  # ──────────────────────────────────────────────────
+  # 2. Python 侧：语法 + 导入 + 关键纯逻辑
+  # ──────────────────────────────────────────────────
+  python:
+    name: Python 侧
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 装依赖
+        run: pip install opencv-python-headless numpy
+
+      - name: 语法检查（全部 .py）
+        run: |
+          python -m compileall -q py/ || exit 1
+          echo "所有 Python 文件语法正常"
+
+      - name: 检查模块能 import
+        run: |
+          cd py
+          python -c "
+          import anvil, scan, vision_check, requirements
+          print('anvil / scan / vision_check / requirements 都能 import')
+          "
+
+      - name: 审图模块能读图跑分
+        run: |
+          cd py
+          python - <<'PY'
+          import numpy as np, cv2, os, tempfile
+          from vision_check import check_image, imwrite_u
+          # 造一张合成图：绿色地面 + 一个"角色"色块
+          img = np.zeros((360, 640, 3), np.uint8)
+          img[:, :] = (60, 140, 60)                       # 草地（BGR）
+          cv2.rectangle(img, (280, 120), (360, 300), (170, 170, 0), -1)   # 青衬衫
+          cv2.rectangle(img, (280, 80), (360, 118), (110, 141, 186), -1)  # 皮肤（头）
+          d = tempfile.mkdtemp()
+          p = os.path.join(d, 't.png')
+          imwrite_u(p, img)
+          r = check_image(p)
+          assert r['ok'], r
+          assert r['details']['subject_box'], '没找到主体'
+          print('审图 OK:', r['verdict'], r['score'], r['details']['subject_box'])
+          PY
+
+      - name: 条件检查能给出安装指引
+        run: |
+          cd py
+          python -c "
+          from requirements import format_report
+          txt, res = format_report()
+          # 至少要有 Blender / MCprep 这些条目
+          assert 'Blender' in txt
+          assert 'MCprep' in txt
+          print('条件检查 OK，共', len(res), '项')
+          "
+
+  # ──────────────────────────────────────────────────
+  # 3. 仓库卫生：不该提交的东西别提交
+  # ──────────────────────────────────────────────────
+  hygiene:
+    name: 仓库卫生
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 没有把第三方资产提交进来
+        run: |
+          set -e
+          bad=$(git ls-files | grep -Ei '\.(blend|blend1)$|^vendor/|^pack/' || true)
+          if [ -n "$bad" ]; then
+            echo "❌ 这些文件不该进版本库（第三方资产/装配产物）:"
+            echo "$bad"
+            echo
+            echo "  第三方资产有各自的许可，不应再分发；而且会让仓库变得很重。"
+            echo "  它们应该由使用者跑 'python py/cli.py setup' 自行装配。"
+            echo "  见 .gitignore 和 LICENSE 末尾的声明。"
+            exit 1
+          fi
+          echo "✅ 没有第三方二进制资产"
+
+      - name: 没有把渲染产物提交进来
+        run: |
+          set -e
+          bad=$(git ls-files | grep -Ei '\.(mp4|gif)$|^frame_[0-9]+\.png$|^preview_[0-9]+\.png$' || true)
+          if [ -n "$bad" ]; then
+            echo "❌ 渲染产物不该进版本库:"; echo "$bad"; exit 1
+          fi
+          echo "✅ 没有渲染产物"
+
+      - name: package.json 的市场字段齐全
+        run: |
+          python - <<'PY'
+          import json, sys
+          p = json.load(open('package.json', encoding='utf-8'))
+          need = ['name', 'version', 'description', 'type', 'main', 'exports',
+                  'license', 'repository', 'publishConfig', 'engines', 'dsh', 'files']
+          miss = [k for k in need if k not in p]
+          if miss:
+              print('❌ package.json 缺市场字段:', miss); sys.exit(1)
+          dsh = p['dsh']
+          if 'bundle' not in dsh or 'patch' not in dsh['bundle']:
+              print('❌ dsh.bundle.patch 缺失 —— 插件不会被加载'); sys.exit(1)
+          if dsh.get('manifestVersion') != 1:
+              print('❌ dsh.manifestVersion 应为 1'); sys.exit(1)
+          # files 里绝不能出现 vendor
+          if any('vendor' in f for f in p['files']):
+              print('❌ files 里不能有 vendor/（第三方资产不该进 npm 包）'); sys.exit(1)
+          print('✅ package.json 市场字段齐全')
+          PY
+
+      - name: 文档里的相对链接存在
+        run: |
+          python - <<'PY'
+          import os, re, sys
+          bad = []
+          for md in ['README.md', 'CONTRIBUTING.md', 'docs/使用教程.md']:
+              if not os.path.isfile(md):
+                  bad.append(f'{md}: 文件不存在'); continue
+              txt = open(md, encoding='utf-8').read()
+              base = os.path.dirname(md)
+              for m in re.finditer(r'\]\((?!https?://|#|mailto:)([^)#]+)', txt):
+                  t = m.group(1).strip()
+                  full = os.path.normpath(os.path.join(base, t))
+                  if not os.path.exists(full):
+                      bad.append(f'{md}: 链接指向不存在的 {t}')
+          if bad:
+              print('❌ 文档链接问题:'); [print('  ', b) for b in bad]; sys.exit(1)
+          print('✅ 文档内部链接都有效')
+          PY

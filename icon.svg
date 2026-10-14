@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- dsh-blender-mc：MC 方块 + 相机取景框 + 审图勾 -->
+  <defs>
+    <linearGradient id="grass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7cbd56"/>
+      <stop offset="1" stop-color="#5a9a3c"/>
+    </linearGradient>
+    <linearGradient id="dirt" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8b6444"/>
+      <stop offset="1" stop-color="#6b4a30"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="128" height="128" rx="20" fill="#1a1d23"/>
+
+  <!-- 等轴方块：草地 -->
+  <g transform="translate(64 74)">
+    <polygon points="0,-16 30,0 0,16 -30,0" fill="url(#grass)"/>
+    <polygon points="-30,0 0,16 0,38 -30,22" fill="url(#dirt)"/>
+    <polygon points="30,0 0,16 0,38 30,22" fill="#4d3623"/>
+    <!-- 顶面像素格 -->
+    <g opacity="0.28" fill="#ffffff">
+      <polygon points="-15,-8 -7,-4 -15,0 -23,-4"/>
+      <polygon points="15,-8 23,-4 15,0 7,-4"/>
+    </g>
+  </g>
+
+  <!-- 取景框四角 -->
+  <g stroke="#4ee0ff" stroke-width="4.5" stroke-linecap="round" fill="none">
+    <path d="M14 34 L14 16 L32 16"/>
+    <path d="M96 16 L114 16 L114 34"/>
+    <path d="M114 94 L114 112 L96 112"/>
+    <path d="M32 112 L14 112 L14 94"/>
+  </g>
+
+  <!-- 审图勾（PASS）-->
+  <g transform="translate(94 100)">
+    <circle r="17" fill="#22c55e"/>
+    <path d="M-8 0 L-2.5 6 L8.5 -6.5" stroke="#0b1a10" stroke-width="4.5"
+          fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>
