@@ -118,24 +118,43 @@ jobs:
           fi
           echo "✅ 没有渲染产物"
 
-      - name: files 白名单不会带上 __pycache__
+      - name: files 白名单不会带上缓存文件
         run: |
           python - <<'PY'
-          import json, sys
+          import json, os, sys
           p = json.load(open('package.json', encoding='utf-8'))
           files = p['files']
+
           # ⚠️ 坑 67：npm 的 files 白名单里，.npmignore / .gitignore 都排除不掉东西。
-          #   所以写目录名（"py"）会把 __pycache__/*.pyc 一起带上 ——
-          #   实测多出 13 个 .pyc 共 95 KB，还是 Python 3.14 编的字节码。
-          #   必须写 glob（"py/**/*.py"）。
-          bad = [f for f in files if f == 'py' or f == 'lib']
-          if bad:
-              print('❌ files 里用了裸目录名，会把 __pycache__ 一起带进 npm 包:', bad)
-              print('   改成 glob，例如 "py/**/*.py"')
+          #   所以写裸目录名会把 __pycache__/*.pyc 一起带上 ——
+          #   实测多出 13 个 .pyc 共 95 KB，还是 Python 3.14 编的字节码，
+          #   别人装上去版本不匹配，毫无用处。
+          #
+          #   正确的判据不是"不能写目录名"（lib/ 是合法目录，里面没缓存），
+          #   而是"这个目录里【实际有没有】缓存文件"。
+          problems = []
+          for entry in files:
+              if '*' in entry:
+                  continue                        # glob 模式，天然安全
+              if not os.path.isdir(entry):
+                  continue
+              for dp, dn, fn in os.walk(entry):
+                  if os.path.basename(dp) == '__pycache__':
+                      problems.append(f'{entry} → 含有 __pycache__: {dp}')
+                      break
+                  junk = [x for x in fn if x.endswith(('.pyc', '.pyo', '.pyd'))]
+                  if junk:
+                      problems.append(f'{entry} → 含有字节码: {dp}/{junk[0]}')
+                      break
+
+          if problems:
+              print('❌ files 白名单会把缓存文件打进 npm 包：')
+              for x in problems:
+                  print('   ', x)
+              print()
+              print('   改用 glob，例如 "py/**/*.py" 而不是 "py"')
               sys.exit(1)
-          if not any('**' in f for f in files):
-              print('⚠️  files 里没有任何 glob 模式，确认一下不会带上缓存文件')
-          print('✅ files 白名单写法安全')
+          print('✅ files 白名单不会带上缓存文件')
           PY
 
       - name: package.json 的市场字段齐全
