@@ -11,6 +11,16 @@ import argparse
 import os
 import sys
 
+# ⚠️ 坑 66：Windows 控制台默认是 GBK，打印中文以外的字符（✅ ❌ ⚠️ 这些）
+#   会直接 UnicodeEncodeError 崩掉。实测被这个绊了两次。
+#   与其要求用户记得设 PYTHONIOENCODING=utf-8，不如这里自己强制过去。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        if (_s.encoding or '').lower().replace('-', '') != 'utf8':
+            _s.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, 'blender'))
