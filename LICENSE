@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 dsh-blender-mc contributors
+Copyright (c) 2026 TreeCodeTyper and dsh-blender-mc contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,28 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-## 第三方资产声明
-
-本项目的 MIT 许可**仅覆盖本仓库自身的代码与文档**。
-
-本插件在运行时需要若干第三方资产，它们**不由本项目分发**，需要使用者自行获取：
-
-| 资产 | 许可 / 归属 |
-|---|---|
-| Blender | GPL，<https://www.blender.org/> |
-| MCprep | GPL，<https://github.com/Moo-Ack-Productions/MCprep> |
-| BPS Character Rig | 归 BlenderPlasticStudio 所有 |
-| Cycles Minecraft Rig BSS Edit | 归其作者所有 |
-| Minecraft 相关贴图与素材 | © Mojang Studios，All Rights Reserved |
-| ffmpeg | LGPL / GPL，<https://ffmpeg.org/> |
-| opencv-python | Apache 2.0 |
-| numpy | BSD-3-Clause |
-
-`python py/cli.py setup` 会从**使用者本地已有的资源目录**扫描并复制这些资产到
-`vendor/`，该目录已在 `.gitignore` 中排除，不进入版本库，也不进入 npm 包。
-
-**本项目与 Mojang Studios、Microsoft 无任何隶属或背书关系。**
-"Minecraft" 是 Mojang Studios 的商标。

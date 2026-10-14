@@ -151,7 +151,7 @@ git push origin feat/your-feature
 [MIT](LICENSE) — covers this repo's own code and docs.
 
 Runtime third-party assets are **not distributed** by this project;
-see the notice at the end of [LICENSE](LICENSE).
+see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 > Not affiliated with or endorsed by Mojang Studios or Microsoft.
 > "Minecraft" is a trademark of Mojang Studios.

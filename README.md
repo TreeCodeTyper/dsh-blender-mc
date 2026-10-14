@@ -367,7 +367,7 @@ git push origin feat/你的功能名
 
 [MIT](LICENSE) —— 覆盖本仓库自身的代码与文档。
 
-运行时需要的第三方资产**不由本项目分发**，详见 [LICENSE](LICENSE) 末尾的声明。
+运行时需要的第三方资产**不由本项目分发**，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 > 本项目与 Mojang Studios、Microsoft 无任何隶属或背书关系。
 > "Minecraft" 是 Mojang Studios 的商标。
