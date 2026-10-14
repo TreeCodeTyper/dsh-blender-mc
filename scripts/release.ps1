@@ -152,13 +152,24 @@ try {
     $files | ForEach-Object { Info ("  {0,-46} {1,7} KB" -f $_.path, [math]::Round($_.size/1024,1)) }
     Info ""
 
-    $vendorLeak = @($files | Where-Object { $_.path -match 'vendor|\.blend$|\.zip$' })
-    if ($vendorLeak.Count) {
-        Fail "包里混进了第三方资产！"
-        $vendorLeak | ForEach-Object { Info "  $($_.path)" }
+    # ⚠️ 坑 67：光拦 vendor/ 不够 —— 实测 __pycache__/*.pyc 也会被打进包
+    #   （13 个文件共 95 KB，是 Python 3.14 编的字节码，别人装上去毫无用处）。
+    #   加 .npmignore **没用**：npm 文档明确写了，files 白名单里的文件，
+    #   .npmignore 和 .gitignore 都排除不掉。
+    #   正确做法是 files 里写 glob（"py/**/*.py"）而不是目录名（"py"）。
+    $leak = @($files | Where-Object {
+        $_.path -match 'vendor|__pycache__|\.pyc$|\.pyo$|\.blend1?$|\.zip$|\.tgz$'
+    })
+    if ($leak.Count) {
+        Fail "包里混进了不该有的东西！"
+        $leak | ForEach-Object { Info "  $($_.path)" }
+        Info ""
+        Info "如果看到 __pycache__/.pyc：检查 package.json 的 files"
+        Info "  必须写 glob（py/**/*.py），不能写目录名（py）——"
+        Info "  因为 files 白名单里的路径，.npmignore 排除不掉。"
         exit 1
     }
-    OK "包里没有第三方资产"
+    OK "包里只有该有的东西"
 } catch {
     Warn "解析 npm pack 输出失败，手动跑 'npm pack --dry-run' 看一眼"
 }

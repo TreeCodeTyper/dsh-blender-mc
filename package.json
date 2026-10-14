@@ -5,11 +5,15 @@
   "type": "module",
   "main": "lib/index.js",
   "exports": {
-    ".": { "default": "./lib/index.js" },
+    ".": {
+      "default": "./lib/index.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -35,8 +39,8 @@
   },
   "files": [
     "lib",
-    "py",
-    "docs",
+    "py/**/*.py",
+    "docs/*.md",
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
