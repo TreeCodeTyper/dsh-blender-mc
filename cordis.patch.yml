@@ -26,12 +26,19 @@
     - id: blender-mc
       name: 'dsh-blender-mc'
       config:
-        # 全都留空也能用；填了则优先用填的
+        # 全都留空也能用（本地开发布局会自己往上找工作区）；
+        # 但【作为 npm 包安装时建议至少填 sources】——
+        # 插件装在 <profile>/node_modules/ 下，往上找是找不到工作区的。
         python: ''
         blender: ''
         rig: ''
         item_rig: ''
         textures: ''
         ffmpeg: ''
+        # ★ 用户本地资源目录（mc_setup 扫描用）。数组或分号分隔都行。
+        sources: []
+        # 装配产物存放处。留空用插件内的 vendor/ ——
+        # 但插件目录会被 npm 重装覆盖，想保住就指到别处。
+        vendor: ''
         # 单次渲染超时（建场景 + 渲染）
         renderTimeoutMs: 1800000

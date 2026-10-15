@@ -57,10 +57,27 @@ def run(cmd, log=None, timeout=None, cwd=None):
 def resolve_assets(config=None):
     """找出骨架 / 物品库 / 贴图 / ffmpeg 的实际路径。
 
-    优先级：显式配置 > vendor/manifest.json（setup 装配时写的）> 自动扫描
-    这样"配置留空"和"刚跑完 setup"都能用。
+    优先级：
+        环境变量（DSH 插件把 config 映射过来的）
+      > 显式传进来的 config
+      > vendor/manifest.json（setup 装配时写的）
+      > 现场扫描
+
+    ⚠️ 为什么要加环境变量这一层：
+      作为 DSH 插件跑时，Python 是独立进程，读不到 cordis 的 config。
+      之前 JS 侧只传了 blender 一个参数，结果 cordis.patch.yml 里配的
+      rig / item_rig / textures / ffmpeg 全是摆设 —— 用户配了也不生效，
+      插件还在自己瞎猜路径。
     """
     cfg = dict(config or {})
+    # 环境变量补进 cfg（显式传参优先）
+    for kind, env in (('rig', 'DSH_MC_RIG'),
+                      ('item_rig', 'DSH_MC_ITEM_RIG'),
+                      ('textures', 'DSH_MC_TEXTURES'),
+                      ('ffmpeg', 'DSH_MC_FFMPEG')):
+        v = os.environ.get(env)
+        if v and not cfg.get(kind):
+            cfg[kind] = v
     try:
         from setup_assets import load_manifest, default_sources, scan, choose, WANTED
         man = load_manifest().get('assets', {})

@@ -17,6 +17,48 @@
 
 ---
 
+## [0.1.1] - 2026-10-15
+
+**修的是"装成 npm 包后插件根本连不上配置"的问题。**
+
+v0.1.0 发布后准备实际安装时才发现：`cordis.patch.yml` 里配的东西
+**一个都没生效**。两个独立的缺口叠在一起。
+
+### 修复
+
+- **`lib/index.js`：把插件 config 映射成环境变量传给 Python**
+  Python 是独立进程，读不到 cordis 的 config。之前只通过命令行传了
+  `blender` 一个参数 —— 也就是说 `rig` / `item_rig` / `textures` / `ffmpeg`
+  这四项**配了也是白配**，用户会以为配好了，插件还在自己瞎猜路径。
+  现在统一映射成 `DSH_MC_*` 环境变量。
+
+- **`py/pipeline.py`：`resolve_assets()` 认环境变量**
+  优先级改成：环境变量 > 显式 config > `vendor/manifest.json` > 现场扫描
+
+- **`py/setup_assets.py`：`default_sources()` 改成"按特征找"而不是"按层数找"**
+  本地开发布局是 `<工作区>/04_工具脚本/dsh-blender-mc/py`，往上三层正好是
+  工作区根。但 npm 安装后变成 `<profile>/node_modules/dsh-blender-mc/py`，
+  往上三层是 **profile 目录** —— 在那儿找 `pack/` 永远找不到。
+  现在逐级往上找含 `pack/` 或 `03_素材库/` 的目录，最多 8 层。
+
+- **新增 `DSH_MC_SOURCES` / `DSH_MC_VENDOR`**
+  装成 npm 包时插件目录会被重装覆盖，`vendor/` 放里面会被冲掉；
+  用 `DSH_MC_VENDOR` 可以指到稳定的地方。
+
+### 三种布局都实测过
+
+| 场景 | 结果 |
+|---|---|
+| 本地开发布局 | ✅ 自动找到工作区（3 个源） |
+| npm 布局，无环境变量 | ⚠️ 找不到 —— **所以才必须填 `sources`** |
+| npm 布局 + `DSH_MC_SOURCES` | ✅ 正常 |
+
+### 记录
+
+- 新增坑 69（配置没接通）写进坑清单
+
+---
+
 ## [0.1.0] - 2026-02-XX
 
 首个可用版本。
@@ -89,6 +131,8 @@
 | 66 | Windows 控制台默认 GBK → 打印 ✅ ❌ ⚠️ 这类符号会 `UnicodeEncodeError` 崩掉。`cli.py` 启动时强制把 stdout/stderr 切到 UTF-8（用 `errors='replace'` 兜底），不要求用户记得设 `PYTHONIOENCODING` |
 | 67 | **`package.json` 的 `files` 白名单里，`.npmignore` 和 `.gitignore` 都排除不掉东西。** 所以写裸目录名（`"py"`）会把 `__pycache__/*.pyc` 一起带进 npm 包（实测 13 个文件 95 KB）。必须写 glob（`"py/**/*.py"`）。加 `.npmignore` 反而更糟 —— 它的存在让 npm 不再参考 `.gitignore`，`.pyc` 从 4 个变成 13 个 |
 | 68 | **npm 账号开了 2FA 时，Classic Token 的 "Publish" 类型不绕过 2FA**，`npm publish` 报 `403 Two-factor authentication ... required`。只有 "Automation" 类型（或勾了 "Bypass 2FA" 的 Granular Token）能免验证码发布；否则每次都要 `--otp=123456`。注意 `npm publish --dry-run` **不会**触发这个检查，所以它通过不代表真发布能过 |
+| 69 | **DSH 插件里，JS 侧的 config 不会自动到 Python 侧。** Python 是独立进程，读不到 cordis 的 config —— 必须自己用环境变量或命令行参数传。v0.1.0 只传了 `blender` 一个，导致 `cordis.patch.yml` 里配的 rig/textures/ffmpeg 全是摆设，配了也不生效 |
+| 70 | **"按层数往上找目录"在插件装成 npm 包后必然失效。** 本地布局 `<工作区>/04_工具脚本/插件/py` 往上三层是工作区根，但 npm 布局 `<profile>/node_modules/插件/py` 往上三层是 profile 目录。要**按特征找**（遇到含 `pack/` 的目录就当工作区根），不能按固定层数 |
 
 [Unreleased]: https://github.com/TreeCodeTyper/dsh-blender-mc/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/TreeCodeTyper/dsh-blender-mc/releases/tag/v0.1.0

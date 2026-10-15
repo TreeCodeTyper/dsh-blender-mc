@@ -33,7 +33,10 @@ import sys
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-VENDOR = os.path.join(os.path.dirname(HERE), 'vendor')
+# 装配产物的存放处。默认放插件自己的 vendor/；
+# 用 DSH_MC_VENDOR 可以指到别处 —— 装成 npm 包时插件目录会被重装覆盖，
+# 把 vendor/ 放到稳定的地方才不会被冲掉。
+VENDOR = os.environ.get('DSH_MC_VENDOR') or os.path.join(os.path.dirname(HERE), 'vendor')
 
 # 每项资产：目标相对路径、认文件名用的关键词、必需的候选名、说明
 WANTED = {
@@ -289,15 +292,49 @@ def assemble(sources, blender=None, progress=print, copy=True, dry=False):
 def default_sources():
     """没给资源目录时的默认搜索位置。
 
-    pack/ 放第三方工具包；03_素材库/ 放工作区自己攒的贴图。
-    两处都要扫 —— 贴图不在 pack 里，第一次实测就漏掉了。
+    优先级：
+      ① 环境变量 DSH_MC_SOURCES（DSH 插件从 config 映射过来，分号分隔）
+      ② 从插件目录逐级往上找，遇到含 pack/ 或 03_素材库/ 的就当工作区根
+      ③ 退回插件上一级（本地开发时的常见情况）
+
+    ⚠️ 为什么不能只按固定层数往上推：
+      本地开发时布局是 <工作区>/04_工具脚本/dsh-blender-mc/py —— 往上三层
+      正好是工作区根。但 npm 安装后变成 <profile>/node_modules/dsh-blender-mc/py，
+      往上三层是 profile 目录，在那儿找 pack/ 永远找不到，
+      用户只会看到"贴图/骨架没找到"，不知道为什么。
+      所以改成【按特征找】而不是【按层数找】。
     """
-    ws = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
     out = []
-    for rel in ('pack', os.path.join('03_素材库', '方块贴图')):
-        p = os.path.join(ws, rel)
-        if os.path.isdir(p):
+
+    # ① 环境变量
+    for p in os.environ.get('DSH_MC_SOURCES', '').split(';'):
+        p = p.strip()
+        if p and os.path.isdir(p) and p not in out:
             out.append(p)
+    if out:
+        return out
+
+    # ② 逐级往上找工作区特征
+    marks = ('pack',
+             os.path.join('03_素材库', '方块贴图'),
+             os.path.join('03_素材库', '方块贴图', 'minecraft', 'block'))
+    d = HERE
+    for _ in range(8):                     # 最多往上 8 层
+        nd = os.path.dirname(d)
+        if not nd or nd == d:
+            break
+        d = nd
+        for rel in marks:
+            p = os.path.join(d, rel)
+            if os.path.isdir(p) and p not in out:
+                out.append(p)
+        if out:
+            return out
+
+    # ③ 退回插件上一级
+    up = os.path.dirname(os.path.dirname(HERE))
+    if os.path.isdir(up) and up not in out:
+        out.append(up)
     return out
 
 
