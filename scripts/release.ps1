@@ -21,7 +21,11 @@ param(
     [switch]$SkipPush,
     [switch]$SkipPublish,
     [switch]$DryRun,
-    [switch]$Yes
+    [switch]$Yes,
+    # npm 账号开了 2FA 时，发布要现场给一次性验证码：
+    #     -File scripts\release.ps1 -Otp 123456
+    # 或者换一个 Automation / 勾了 bypass 2FA 的 token，就不用每次给了。
+    [string]$Otp = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -188,8 +192,40 @@ if ($SkipPublish) {
         $ans = Read-Host "  确认发布 $name@$ver 到 npm？(y/N)"
         if ($ans -ne 'y' -and $ans -ne 'Y') { Warn "已取消"; exit 0 }
     }
-    npm publish --access public
-    if ($LASTEXITCODE -ne 0) { Fail "发布失败"; exit 1 }
+    $pubArgs = @('publish', '--access', 'public')
+    if ($Otp) {
+        $pubArgs += "--otp=$Otp"
+        Info "带一次性验证码发布（--otp=$Otp）"
+    }
+    $out = & npm @pubArgs 2>&1 | Out-String
+    $out.Trim() | ForEach-Object { Info $_ }
+
+    if ($LASTEXITCODE -ne 0) {
+        Fail "发布失败"
+
+        # ⚠️ 坑 68：npm 账号开了 2FA 时，Classic Token 里的 "Publish" 类型
+        #   不绕过 2FA，必须现场给 OTP；只有 "Automation" 类型（或勾了
+        #   "bypass 2FA" 的 Granular Token）才能免验证码发布。
+        #   报错原文：
+        #     403 Forbidden - Two-factor authentication or granular access
+        #     token with bypass 2fa enabled is required to publish packages.
+        if ($out -match 'Two-factor|2fa|E403|403 Forbidden') {
+            Info ""
+            Info "看起来是 npm 的 2FA 拦截。两种解法："
+            Info ""
+            Info "  【A】现场给一次性验证码（最快，手机上打开验证器看 6 位数字）"
+            Info "        powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Otp 123456"
+            Info ""
+            Info "  【B】换一个能绕过 2FA 的 token（一劳永逸）"
+            Info "        1. 打开 https://www.npmjs.com/settings/~/tokens"
+            Info "        2. Generate New Token → Classic Token → 类型选 【Automation】"
+            Info "           （选 Publish 不行 —— 那个仍然要求验证码）"
+            Info "        3. 复制 token，配到本地："
+            Info "             npm config set //registry.npmjs.org/:_authToken=你的token"
+            Info "        4. 重新跑本脚本，不用再带 -Otp"
+        }
+        exit 1
+    }
     OK "发布成功"
     Info ""
     Info "包地址: https://www.npmjs.com/package/$name"
