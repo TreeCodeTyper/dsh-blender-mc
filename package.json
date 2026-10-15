@@ -1,6 +1,6 @@
 {
   "name": "dsh-blender-mc",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Minecraft 存档 → Blender 封面 / 动画。自动找机位、导出几何、搭场景、渲染，并用 OpenCV 自动审图（渲完自己检查朝向 / 接地 / 曝光 / 布光 / 构图，不合格自动调参重渲）。",
   "type": "module",
   "main": "lib/index.js",
