@@ -17,6 +17,38 @@
 
 ---
 
+## [0.2.1] - 2026-10-20
+
+**修掉「装上这个插件，DSH 就再也打不开，只能重装」的致命问题 —— 责任在安装脚本，不在渲染逻辑。**
+
+### 修复
+
+- **`scripts/install_to_profile.py` 会写坏 `cordis.patch.yml`（致命）**：profile 模板里的补丁层初始内容是一个空的 `[]` 占位符，旧脚本直接往文件末尾追加 `- id: blender-mc` 条目，于是文件里同时出现两个顶层元素 ——
+  ```yaml
+  []
+
+  - id: blender-mc
+    name: 'dsh-blender-mc'
+  ```
+  这不是合法 YAML。DSH 启动时 `parsePatchList()` 抛 `YAMLException: end of the stream or a document separator is expected`，异常一路冒到 `prepareProfile()`，Electron 主进程直接退出：双击图标窗口一闪就没，GUI 也进不去，用户视角只有「重装 DSH」一条路。
+  现在的脚本会先把 `[]` 占位符改写成 `# []`（注释掉，保留提示），再追加条目；写入前用 PyYAML 自检「解析结果必须是顶层数组」；写完还会跑一次 `dsh <profile> --dump-config` 做门禁，失败就自动回滚。重复执行是幂等的，`--remove` 会把文件还原成单个 `[]`。
+- **补丁层只剩注释/空文件也会起不来**：`parsePatchList()` 对空文档的解析结果是 `null`，报 `must be a top-level YAML array of loader patch entries`。`--remove`、`repair_profile.py` 都会确保文件里留一个 `[]`。
+- 新增 **`scripts/repair_profile.py`**：给已经被写坏、现在打不开的机器用。`python scripts/repair_profile.py` 只体检；加 `--apply` 自动修（改前备份成 `cordis.patch.yml.bak-<时间戳>`）；加 `--restore` 回滚到最近一次备份。**不用重装 DSH。**
+- **工具全部注册失败（DSH 0.2.0-rc.1 起）**：`dsh-tools` 现在强制要求 `output` 声明 `render`，否则 `ctx.tools.register()` 抛
+  `TypeError: tool "mc_doctor" must declare output { schema, render, presentationMeta? }`。
+  0.1.2 / 0.2.0 只写了 `output: { schema: { type: 'object' } }`，于是在新宿主上 7 个工具一个都注册不上（`mc_doctor` 第一个就炸，`apply()` 中断）。现在统一用一个 `OUTPUT` 常量（含 `schema` + `render`），渲染成 markdown 文本块。
+- 单个工具注册失败不再拖垮整个插件：`apply()` 里逐个 try/catch，失败的只记一条 warn，其余工具照常可用。
+- `mc_shoot` 的参数名转 CLI 参数从 `replace('_','-')` 改成 `replaceAll('_','-')`（下划线多于一个的参数不会被截断）。
+- `peerDependencies` 全部标成 optional，版本范围放宽到 `^0.2.0-rc.1 || ^0.2.1-rc.1`（cordis 为 `^4.0.1`），并补上 `dsh.engines.dsh` / `dsh.compatibility.dshReleases` —— 与市场里其它插件一致，避免安装器对新宿主直接拒绝。
+- `files` 补上 `scripts/*.py`、`scripts/*.mjs`，安装/修复脚本会随包发布。
+
+### 排错备忘
+
+- 插件条目自己激活失败**不会**让 DSH 起不来（只有 `agent-loop` / `webserver` / `modules` / `connection` / `headless-runner` / `acp` / `sdk-jsonrpc-server` 这些核心条目失败才致命），只在日志里打一行 `dsh: warning: 1 entry did not activate`。真正让人「只能重装」的是补丁层的 YAML 非法。
+- 手工编辑 `cordis.patch.yml` 的两条铁律：一个文件只能有**一份**顶层列表；没有条目时必须留 `[]`（别留空文件、别只留注释）。
+
+---
+
 ## [0.2.0] - 2026-10-20
 
 **把"某个作品的模型导入"改成了通用的「自带模型 / 模型提取」。**

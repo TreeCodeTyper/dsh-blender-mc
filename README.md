@@ -120,13 +120,51 @@ pip install opencv-python numpy
 
 DSH → 设置 → 插件市场 → 搜索 `dsh-blender-mc` → 安装 → **开新会话**
 
-**方式 B：从源码装**
+**方式 B：命令行装（推荐给要配本机路径的人）**
+
+```bash
+dsh plugin --profile desktop add dsh-blender-mc
+python scripts/install_to_profile.py --profile desktop   # 写本机路径配置（可 --dry-run 预览）
+```
+
+`install_to_profile.py` 会先备份、再改 profile 的 `cordis.patch.yml`，写前用 PyYAML 自查、
+写后用 `dsh <profile> --dump-config` 让 DSH 自己组合一遍 —— 这是 0.2.1 修掉的重点，
+细节见下面「⚠️ 装完 DSH 打不开怎么办」。
+
+**方式 C：从源码装**
 
 ```bash
 git clone https://github.com/TreeCodeTyper/dsh-blender-mc.git
 cd dsh-blender-mc
 python py/cli.py doctor        # 先看看缺什么
 ```
+
+### ⚠️ 装完 DSH 打不开怎么办（0.2.1 之前的坑）
+
+**症状**：双击 DSH 没反应 / 窗口一闪就没；命令行跑 `dsh` 报
+`failed to parse overlay ...\cordis.patch.yml: YAMLException: end of the stream or a document separator is expected`
+或 `... must be a top-level YAML array of loader patch entries`。
+
+**原因**：profile 的补丁层 `cordis.patch.yml` 必须**恰好是一份一维 YAML 列表**。
+0.2.1 之前的 `scripts/install_to_profile.py` 会直接往文件末尾拼 `- id: blender-mc` 块，
+而全新 profile 的模板里那行 `[]` 占位还在 —— `[]` 后面再跟块条目就是一份文档两个顶层元素，
+YAML 解析失败 → 补丁层读不出来 → 应用起不来。重装 DSH 能让补丁层退回 `[]` 模板，
+所以「只能重装」；但下次再装同一个坑还会踩。
+
+**不用重装的救法**（在 DSH 打不开的状态下也能跑）：
+
+```bash
+python scripts/repair_profile.py            # 先体检，看哪个 profile 的补丁层坏了
+python scripts/repair_profile.py --apply    # 修（写前自动备份 .bak-<时间戳>）
+```
+
+它只做行级修复：把和别人共存的 `[]` 占位注释成 `# []`、文件里一条条目都不剩时补回 `[]`，
+然后重启 DSH 即可。修不好也别硬改 —— 把报错贴到
+[issues](https://github.com/TreeCodeTyper/dsh-blender-mc/issues)。
+
+> 手工改的话记住两条：① 一个文件里只能有一份顶层列表；② 没有条目时文件里必须留 `[]`，
+> 只剩注释会被解析成 `null`，同样起不来。
+
 
 ### 第 3 步：装配外部资产
 

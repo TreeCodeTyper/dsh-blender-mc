@@ -1,6 +1,6 @@
 {
   "name": "dsh-blender-mc",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Minecraft 存档 → Blender 封面 / 动画。自动找机位、导出几何、搭场景、渲染，并用 OpenCV 自动审图（渲完自己检查朝向 / 接地 / 曝光 / 布光 / 构图，不合格自动调参重渲）。自带模型能力：把你自己资源包里的 Bedrock 模型转成 OBJ 摆进画面（插件不附带任何模型/贴图）。",
   "type": "module",
   "main": "lib/index.js",
@@ -18,7 +18,16 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
-    "manifestVersion": 1
+    "manifestVersion": 1,
+    "engines": {
+      "dsh": ">=0.2.0-rc.1"
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.0-rc.1": "compatible",
+        "0.2.0-rc.2": "compatible"
+      }
+    }
   },
   "repository": {
     "type": "git",
@@ -33,14 +42,27 @@
     "registry": "https://registry.npmjs.org/"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-subprocess": "^0.2.0-rc.2",
-    "@deepseek-ai/dsh-tools": "^0.2.0-rc.2"
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-subprocess": "^0.2.0-rc.1 || ^0.2.1-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.2.0-rc.1 || ^0.2.1-rc.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-subprocess": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
   },
   "files": [
     "lib",
     "py/**/*.py",
     "docs/*.md",
+    "scripts/*.py",
+    "scripts/*.mjs",
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
@@ -70,6 +92,8 @@
     "doctor": "python py/cli.py doctor",
     "setup": "python py/cli.py setup",
     "check": "python py/cli.py check",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "install-profile": "python scripts/install_to_profile.py",
+    "repair-profile": "python scripts/repair_profile.py"
   }
 }
