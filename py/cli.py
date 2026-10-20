@@ -2,6 +2,7 @@
 """dsh-blender-mc 命令行入口
 
     python cli.py doctor                        自检（Blender / 依赖 / 骨架 / 物品库）
+    python cli.py extract <资源目录> --out <目录>          提取 Bedrock 模型 → OBJ
     python cli.py scan   <存档> --area x0,x1,z0,z1        在存档里找机位
     python cli.py shoot  <存档> --area ... --out <目录>    出封面（含审图闭环）
     python cli.py anim   <存档> --area ... --out <目录>    出 10 秒动画
@@ -65,6 +66,19 @@ def cmd_doctor(a):
     return 0 if all(ok for _, ok, _, spec in res if spec['required']) else 1
 
 
+def cmd_extract(a):
+    """把资源目录里的 Bedrock 几何批量转成 OBJ，交给 Blender 摆放。"""
+    import json
+    from extract import extract
+    m = extract(a.assets, a.out, keyword=a.filter, anim=a.anim,
+                anim_name=a.anim_name, list_only=a.list, progress=print)
+    if a.json:
+        with open(a.json, 'w', encoding='utf-8') as f:
+            json.dump(m, f, ensure_ascii=False, indent=2)
+        print(f'\n已写 {a.json}')
+    return 0 if m.get('count') else 1
+
+
 def cmd_scan(a):
     from pipeline import step_scan
     y = tuple(int(v) for v in str(a.y).split(','))
@@ -97,12 +111,17 @@ def cmd_shoot(a):
         params['view_transform'] = a.view_transform
     if a.sink is not None:
         params['sink'] = a.sink
+    if a.res:
+        params['res'] = a.res
+    if a.samples:
+        params['samples'] = a.samples
     center = tuple(int(v) for v in a.center.split(',')) if a.center else None
     r = shoot(a.save, a.area, a.out, blender=a.blender, params=params,
               center=center, radius=a.radius, max_attempts=a.attempts,
               target_score=a.target, progress=print)
     print('\n' + '=' * 66)
     print(f"最终: {r['verdict']} {r['score']} 分   {r['png']}")
+    print(f"尺寸: {r.get('res_actual') or '?'}（请求 {r.get('res_requested') or '默认'}）")
     print(f"机位 ({r['center'][0]},{r['center'][1]})   "
           f"yaw={r['params']['yaw']}° 方位={r['params']['cam_az']}° "
           f"距离={r['params']['dist']:.1f}")
@@ -156,6 +175,16 @@ def main():
     st.add_argument('--link', action='store_true', help='用硬链接代替复制')
     st.set_defaults(func=cmd_setup)
 
+    e = sub.add_parser('extract', help='提取 Bedrock 模型（.geo.json + 贴图）→ OBJ')
+    e.add_argument('assets', help='资源包 / 模组解包目录（会递归找 *.geo.json）')
+    e.add_argument('--out', required=True, help='输出目录')
+    e.add_argument('--filter', default=None, help='只转路径里含这个关键词的模型')
+    e.add_argument('--anim', default=None, help='animation.json（可选，套一段静态姿势）')
+    e.add_argument('--anim-name', default=None, help='要套用的动画名，缺省取第一条')
+    e.add_argument('--list', action='store_true', help='只列出会转什么，不动文件')
+    e.add_argument('--json', default=None, help='把清单另存为 json')
+    e.set_defaults(func=cmd_extract)
+
     s = sub.add_parser('scan', help='在存档里找机位')
     s.add_argument('save')
     s.add_argument('--area', type=_area, required=True)
@@ -176,6 +205,8 @@ def main():
     h.add_argument('--dist', type=float, default=None)
     h.add_argument('--sky', type=float, default=None)
     h.add_argument('--sink', type=float, default=None)
+    h.add_argument('--res', default=None, help='输出尺寸，如 1920x1080（默认 1280x720）')
+    h.add_argument('--samples', type=int, default=None, help='EEVEE 采样数，默认 256')
     h.add_argument('--view-transform', default=None)
     h.add_argument('--attempts', type=int, default=3)
     h.add_argument('--target', type=int, default=85)

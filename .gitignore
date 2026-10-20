@@ -28,3 +28,6 @@ preview_*.png
 .env.local
 *.local.yml
 node_modules/
+
+# 测试临时目录（scripts/test_extract.py 在沙箱里会退到仓库内）
+scripts/.tmp_extract_test/

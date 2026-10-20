@@ -40,5 +40,14 @@
         # 装配产物存放处。留空用插件内的 vendor/ ——
         # 但插件目录会被 npm 重装覆盖，想保住就指到别处。
         vendor: ''
+        # 自带模型清单（可选）：models.json 的路径，或直接写数组。
+        #   models:
+        #     - name: 木桶
+        #       obj: D:/assets/barrel/barrel.obj
+        #       tex: D:/assets/barrel/barrel.png
+        #       scale: 1.0   # back/side/z/yaw 同理
+        # 留空则读环境变量 DSH_MODEL1_OBJ / DSH_MODEL2_OBJ / DSH_MODEL3_OBJ。
+        # 模型与贴图由使用者自备，插件不附带、也不下载任何第三方素材。
+        models: ''
         # 单次渲染超时（建场景 + 渲染）
         renderTimeoutMs: 1800000

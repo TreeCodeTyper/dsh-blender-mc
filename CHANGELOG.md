@@ -17,6 +17,82 @@
 
 ---
 
+## [0.2.0] - 2026-10-20
+
+**把"某个作品的模型导入"改成了通用的「自带模型 / 模型提取」。**
+
+原先 `build_cover.py` 里有一段只服务于单一作品的模型导入代码：环境变量、
+材质名、日志全都带着作品名；而且这段代码只存在于工作区，没进 npm 包 ——
+面板调用和本地源码行为不一致。现在整条链路改成通用能力：任何符合 Bedrock
+几何格式的模型都能进来，插件本身**不含任何作品名，也不附带任何模型或贴图**。
+
+### 新增
+
+- `python py/cli.py extract <资源目录> --out <目录>`：批量把 `.geo.json` + 贴图转成 OBJ，
+  自动按 `identifier` 命名、猜贴图、写 `models.json` 清单（来源 / 面数 / 包围盒 / 失败项）
+- `py/bedrock.py`：Bedrock 几何 → OBJ 转换器（纯 Python，不需要 Blender）
+- `py/extract.py`：批量提取 + 贴图匹配 + 单模型元信息
+- `py/model_spec.py`：`DSH_MODELS` 描述文件 / `DSH_MODEL1_*` 槽位的统一解析
+- 新工具 `mc_extract_models`（DSH 侧第 7 个工具）
+- 插件 config 新增 `models:`，可以写 `models.json` 路径，也可以直接写数组
+- `docs/自带模型.md`：参数表、常见问题、授权与合规
+- `scripts/test_extract.py`：不依赖任何素材的提取链路自测（CI 里跑）
+
+### 修复
+
+- **分辨率 / 采样没接线**：`step_render` 只传了 8 个参数，`params['res']` 从头到尾没生效 ——
+  `结果.json` 写 `1280x720`，实际可能出 `960x540`。现在通过 `DSH_RES_X/Y` + `DSH_SAMPLES`
+  传给 build_cover，渲染后**读回 PNG 实际尺寸**写进 `结果.json`（`res_requested` / `res_actual`），
+  不一致会在日志里告警。`shoot` 新增 `--res` / `--samples`，`mc_shoot` 同步开放。
+- **doctor 对 MCprep 假绿**：只看 addon 目录在不在就报「✅ 已安装」，
+  实际 `prep_materials` 可能没注册上。现在 doctor 会真跑一次 Blender 探测操作符，
+  失败时明确提示「会自动走内置材质兜底」（不阻断 —— 兜底能出可用图）。
+- **`install_to_profile.py` 版本写死 `^0.1.1`**：改成读 `package.json` 的 version，
+  以后发版不用再改脚本。
+- **`animate()` 的 docstring 说"导出 MP4/GIF"**：实际只出帧序列，改成如实描述
+  （转视频由 cli 打印 ffmpeg 命令）。
+- `build_cover.py` 头部注释过期（"相对 NPM 原版的两处改动"）→ 改成当前运行方式与坑索引。
+- 删掉未跟踪的 `py.bak_原版/`（有 git 历史，不需要目录备份）；`.gitignore` 补测试临时目录。
+- **握剑姿势**：之前只把剑 bone-parent 到 `Hand.R`，**完全没摆手臂** —— 手垂在胯边，
+  1.4 格长的剑只能横在胸前，看起来就是"没握住"。现在按课程笔记 4.4（BPS V4 手臂默认 FK）
+  转 `Top Arm.R` / `Bottom Arm.R` / `Hand.R` 三根 pose bone 摆出举剑姿势，
+  抓握点改用**摆好姿势后的** `Hand.R` 骨（网格 bbox 不含骨架形变，手抬起来它还停在原位）。
+  可用 `DSH_ARM_POSE=0` 关掉，`DSH_ARM_SHOULDER/ELBOW/WRIST` 微调角度。
+- **握持不是一个点，而是一段**：第一版把柄尾顶在掌心，剑整把都在手上方，看着像"托着"。
+  现在沿刃轴把剑下沉 `DSH_SWORD_SINK`（默认 0.55 本地单位 ≈ 0.28 方块），
+  手掌包住一段柄、柄尾从拳下露出、刀刃从拳上伸出 —— 手和剑真正相交。
+- **动画第一帧会把手臂打回垂手**：`animate_aura.py` 的关键帧原本是绝对值，
+  现在改成**相对封面姿势的增量**，挥砍从举剑姿势起手。
+- **相对路径的输出目录写不进图**：Blender 按工作目录解析相对路径，只报
+  `No such file or directory`，图白渲一遍。`shoot()` / `animate()` 现在统一转绝对路径。
+- **MCprep 没注册上时画面发白**：MC 的草顶 / 树叶 / 水贴图本身是灰的，颜色靠群系 tint；
+  MCprep 的 `tracker.json` 写盘被拒会导致 addon 注册中断、`bpy.ops.mcprep.*` 全部消失，
+  草地就渲染成一片灰白。现在检测到 `prep_materials` 跑不通时会走**内置兜底**：
+  贴图直连 + 群系染色 + 对齐 MCprep 的材质参数（Roughness 0.72 / Specular 0），
+  日志会打印 `⚠️ MCprep 没跑通 → 用内置兜底…`。MCprep 正常时不会触发。
+- `scripts/test_extract.py` 的合成贴图改为纯标准库写 PNG（带条纹）：
+  之前走 cv2 时中文路径写不进、静默退化成纯色，验证不出 UV 是否对
+
+### 变更
+
+- `build_cover.py`：模型导入改为通用 `import_model()`，日志前缀 `[模型 N]`、
+  材质名 `ModelN`，落位逻辑（朝向 → 缩放 → 包围盒贴地）不变
+- 环境变量统一为 `DSH_MODEL1_* / DSH_MODEL2_* / DSH_MODEL3_*`
+  （i=1 也接受不带数字的 `DSH_MODEL_*`）
+
+### 迁移
+
+- v0.1.x 的旧环境变量前缀仍然可用，日志里会提示迁移，**下个主版本移除**
+- 旧的作品专用导入函数已删除，不再读取任何作品相关命名
+
+### 合规
+
+- npm 包依旧只含代码与文档：`files` 白名单里没有任何资产目录
+- CI 的 `hygiene` 继续拦截 `vendor/`、`.blend`、渲染产物、模型/贴图提交
+- README / 使用教程 / `docs/自带模型.md` 增加"素材授权自行确认、插件不分发"的说明
+
+---
+
 ## [0.1.1] - 2026-10-15
 
 **修的是"装成 npm 包后插件根本连不上配置"的问题。**

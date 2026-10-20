@@ -53,6 +53,9 @@ jobs:
           print('anvil / scan / vision_check / requirements 都能 import')
           "
 
+      - name: 模型提取链路（不需要 Blender / 不需要素材）
+        run: python scripts/test_extract.py
+
       - name: 审图模块能读图跑分
         run: |
           cd py
@@ -97,7 +100,7 @@ jobs:
       - name: 没有把第三方资产提交进来
         run: |
           set -e
-          bad=$(git ls-files | grep -Ei '\.(blend|blend1)$|^vendor/|^pack/' || true)
+          bad=$(git ls-files | grep -Ei '\.(blend|blend1)$|\.(geo\.json|obj|mtl)$|^vendor/|^pack/' || true)
           if [ -n "$bad" ]; then
             echo "❌ 这些文件不该进版本库（第三方资产/装配产物）:"
             echo "$bad"

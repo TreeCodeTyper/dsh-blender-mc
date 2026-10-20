@@ -35,6 +35,18 @@ CI 里有一条 `hygiene` 检查专门拦这个（见 `.github/workflows/ci.yml`
    Cycles Rig 551 MB）更是没必要 —— 本项目用纯 Python 直接读 `.mca`，
    **不需要 Mineways 那套 GUI 导出流程**
 
+## 使用者自备的模型与贴图
+
+本插件提供**模型提取与摆放**能力，但**不附带任何模型或贴图**：
+
+- 提取（`python py/cli.py extract`）只转换使用者自己目录里的
+  Bedrock 几何（`.geo.json`）与贴图，产物落在使用者指定的目录
+- 插件不上传、不下载、不内置任何模型；代码里也不含任何作品名
+- 提取产物能否分发 / 商用，取决于原素材的许可 —— 需要使用者自行确认
+
+CI 的 `hygiene` 检查会拦下 `.geo.json` / `.obj` / `.mtl` 等模型文件的提交，
+防止有人把素材误提交进仓库。
+
 ## 商标
 
 本项目与 Mojang Studios、Microsoft **无任何隶属或背书关系**。

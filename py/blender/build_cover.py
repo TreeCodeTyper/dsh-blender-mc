@@ -1,22 +1,25 @@
 # -*- coding: utf-8 -*-
+# 运行方式（由 pipeline.step_render 调用，输出目录必须是绝对路径）：
+#   blender -b --factory-startup --python build_cover.py -- <世界.obj> <输出目录> \
+#        <yaw> <lens> <view_transform> <sky> <cam_az> <dist> <sink>
+# 可选环境变量：DSH_RES_X/Y、DSH_SAMPLES、DSH_SKIN、DSH_SUN_*、DSH_ARM_*、DSH_SWORD_SINK、DSH_MODEL1_*
 """封面_世界 —— 在真实存档的草原上渲染 Steve 持钻石剑
 
 用到的课程结论（B站 Woodplank 课）：
   T55   BPS V4.0.9（非 BETA1）+ 以【集合】方式追加
   T11   mcprep.prep_materials 管材质
-  实测  MCprep 自己做群系染色（所以导出器不再烘染色）
+  实测  MCprep 自己做群系染色（所以导出器不再烘染色）；
+        MCprep 挂掉时这里有一套内置兜底（贴图 + 群系乘色 + 调平材质）
   T30   视图转换用「标准」
   T48   60-80mm、角色偏左留白、三点布光(100/50-70/100)
 
-钻石剑挂载（坑 51）：
+钻石剑挂载（坑 51 / 55 / 71 / 72）：
   剑的【网格本地】包围盒 X[-0.7,1.3] Y[-0.7,1.3] Z[-0.02,0.1]，
-  刀刃是【本地对角方向】——柄在 (-0.7,-0.7)，尖在 (1.3,1.3)。
-  而且对象自带 rotation_euler=(1.5771,0,0)（绕X 90°）。
-  之前直接写 o.matrix_world = ... 会把这个自带旋转【覆盖掉】，
-  剑就躺平贴在身侧了 → 看起来"没拿上"。
-  正确做法：用刀刃方向 + 面法线构造正交基，自己算完整矩阵。
-
-用法: blender -b --factory-startup --python 封面_世界.py -- <世界.obj> <输出目录> [相机方位角]
+  刀刃是【本地对角方向】——柄在 (-0.7,-0.7)，尖在 (1.3,1.3)；
+  对象自带 rotation_euler=(1.5771,0,0)（绕 X 90°），直接写 matrix_world 会覆盖它。
+  挂法三步：① 用 FK 摆右臂（Top/Bottom Arm.R + Hand.R）；
+            ② 抓握点取摆完姿势后的 Hand.R 骨中点（不能用网格 bbox）；
+            ③ 剑沿刃轴下沉 DSH_SWORD_SINK，让手掌包住一段柄 —— 握持不是"托着"。
 """
 import math
 import os
@@ -31,9 +34,29 @@ from _compat import (set_engine, set_sky_type, set_view_transform,   # noqa: E40
                      eval_bbox, is_driven_body)
 
 PACK = r"E:\游戏与自媒体\AI自媒体工作区\pack"
-BPS = os.path.join(PACK, "BPS_Rig_v4", "BPS Character Rig V4.0.9.blend")
-ITEM = os.path.join(PACK, "Cycles_Minecraft_Rig_BSS_Edit_V6_5",
-                    "Cycles_Minecraft_Rig BSS Edit V6.5", "Minecraft_Item_Rig.blend")
+BPS = os.environ.get("DSH_BPS_RIG") or os.path.join(
+    PACK, "BPS_Rig_v4", "BPS Character Rig V4.0.9.blend")
+ITEM = os.environ.get("DSH_ITEM_RIG") or os.path.join(
+    PACK, "Cycles_Minecraft_Rig_BSS_Edit_V6_5",
+    "Cycles_Minecraft_Rig BSS Edit V6.5", "Minecraft_Item_Rig.blend")
+
+# ★ 用户皮肤：设了 DSH_SKIN 就把它贴到角色身上，否则保持原版 Steve
+SKIN = os.environ.get("DSH_SKIN", "").strip()
+# ★ 输出分辨率：竖版封面用 1080x1920 之类
+RES_X = int(os.environ.get("DSH_RES_X", "1280"))
+RES_Y = int(os.environ.get("DSH_RES_Y", "720"))
+SAMPLES = int(os.environ.get("DSH_SAMPLES", "256"))   # EEVEE 采样数
+
+# ★ 光照/氛围（工作区副本新增）——做"黄昏逆光"这类氛围片用
+SUN_ELEV = float(os.environ.get("DSH_SUN_ELEV", "45"))      # 太阳仰角（度）8=黄昏贴地
+SUN_ROT = float(os.environ.get("DSH_SUN_ROT", "215"))       # 太阳方位（度）
+SUN_INT = float(os.environ.get("DSH_SUN_INT", "3.5"))       # 太阳强度
+KEY_SCALE = float(os.environ.get("DSH_KEY_SCALE", "1.0"))   # 三点布光整体倍率
+CAM_H = float(os.environ.get("DSH_CAM_H", "2.45"))          # 相机离地（格）
+AIM_H = float(os.environ.get("DSH_AIM_H", "1.05"))          # 看向高度（格）
+AIM_SIDE = float(os.environ.get("DSH_AIM_SIDE", "0.9"))     # 看向点横移（留白量）
+EXPOSURE = float(os.environ.get("DSH_EXPOSURE", "0.0"))     # 曝光补偿
+LENS_OVR = float(os.environ.get("DSH_LENS", "0"))           # 焦距覆盖（0=用默认）
 
 argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
 OBJ = argv[0]
@@ -147,12 +170,115 @@ bpy.ops.object.select_all(action='DESELECT')
 for o in wmesh:
     o.select_set(True)
 bpy.context.view_layer.objects.active = wmesh[0]
+prep_ok = False
 try:
     r = bpy.ops.mcprep.prep_materials(autoFindMissingTextures=True,
                                       usePrincipledShader=True, useEmission=True)
+    prep_ok = 'FINISHED' in str(r) or 'RUNNING_MODAL' in str(r)
     p(f"    返回 {r}")
 except Exception as e:
     p(f"    FAIL {type(e).__name__}: {str(e)[:140]}")
+
+
+# ---- 材质兜底：MCprep 没跑通时，自己做最基础的群系染色 ----
+#   ⚠️ 为什么需要：MC 的 grass_block_top / 树叶贴图本身是【灰的】，
+#   颜色在游戏里由群系 tint 决定。MCprep 挂了（实测 addon 注册时写
+#   tracker.json 抛 PermissionError → 它的 operator 一个都没注册上），
+#   草地就会渲染成一片灰白 —— 这正是"世界发白"的根因。
+#   这里补一个最小的乘色，够出封面用；MCprep 正常时不会触发。
+BIOME_TINT = {
+    'grass_block_top': (0.36, 0.72, 0.16),      # 平原草地（实测对齐：偏纯绿）
+    'grass_block_side': None,                    # 侧面带泥土，不整体染
+    'water_still': (0.20, 0.42, 0.85),
+    'water_flow': (0.20, 0.42, 0.85),
+}
+_LEAF_TINT = (0.28, 0.62, 0.16)
+
+
+def _tint_for(name):
+    base = name.split('.')[0].lower()
+    if base in BIOME_TINT:
+        return BIOME_TINT[base]
+    if 'leaves' in base or 'vine' in base or 'fern' in base:
+        return _LEAF_TINT
+    if base in ('grass', 'short_grass', 'tall_grass', 'grass_block'):
+        return BIOME_TINT['grass_block_top']
+    return None
+
+
+def _mix_rgb(nt):
+    """建一个 Multiply 混色节点（兼容 4.x/5.x 的两种 Mix 节点）。"""
+    try:
+        n = nt.nodes.new('ShaderNodeMixRGB')
+        n.blend_type = 'MULTIPLY'
+        n.inputs['Fac'].default_value = 1.0
+        return n, n.inputs[1], n.inputs[2], n.outputs[0]
+    except Exception:
+        n = nt.nodes.new('ShaderNodeMix')
+        n.data_type = 'RGBA'
+        n.blend_type = 'MULTIPLY'
+        n.inputs[0].default_value = 1.0
+        return n, n.inputs[6], n.inputs[7], n.outputs[2]
+
+
+def fallback_prep_materials():
+    """MCprep 不可用时的最小替代：贴图接上 + 群系染色 + 调平材质。
+
+    对齐 MCprep 出来的观感（实测它的成品材质是 Roughness 0.7 / Specular 0）：
+    不调这两项的话，草地会反出一层白光，看着"发白、没细节"。
+    """
+    tinted = 0
+    tuned = 0
+    for m in bpy.data.materials:
+        if not (m.use_nodes and m.node_tree):
+            continue
+        nt = m.node_tree
+        tex = next((x for x in nt.nodes if x.type == 'TEX_IMAGE' and x.image), None)
+        bsdf = next((x for x in nt.nodes if x.type == 'BSDF_PRINCIPLED'), None)
+        if not tex or not bsdf:
+            continue
+        # 1) 材质参数：去掉高光，粗糙度对齐 MCprep
+        for key, val in (('Roughness', 0.72), ('Specular IOR Level', 0.0),
+                         ('Specular', 0.0)):
+            sock = bsdf.inputs.get(key)
+            if sock is not None and not sock.is_linked:
+                try:
+                    sock.default_value = val
+                    tuned += 1
+                except Exception:
+                    pass
+        try:
+            tex.interpolation = 'Closest'
+        except Exception:
+            pass
+        # 2) 灰度贴图乘群系色
+        tint = _tint_for(m.name)
+        if not tint:
+            continue
+        if any(x.type in ('MIX', 'MIX_RGB') for x in nt.nodes):
+            continue                        # 已经染过
+        in_sock = bsdf.inputs.get('Base Color')
+        if not in_sock:
+            continue
+        mix, c1, c2, out = _mix_rgb(nt)
+        c2.default_value = (tint[0], tint[1], tint[2], 1.0)
+        for lk in list(in_sock.links):
+            nt.links.remove(lk)
+        nt.links.new(tex.outputs['Color'], c1)
+        nt.links.new(out, in_sock)
+        if tex.image.depth == 32 or 'leaves' in m.name.lower():
+            try:
+                m.blend_method = 'CLIP'
+            except Exception:
+                pass
+        tinted += 1
+    return tinted, tuned
+
+
+if not prep_ok:
+    p("    ⚠️ MCprep 没跑通 → 用内置兜底：贴图 + 群系染色 + 调平材质")
+    _tinted, _tuned = fallback_prep_materials()
+    p(f"    染色 {_tinted} 个材质，调平 {_tuned} 处参数")
 for m in bpy.data.materials:
     if 'grass' in m.name:
         for nd in m.node_tree.nodes:
@@ -257,6 +383,74 @@ skipped = [f"{o.name.replace('BPS v4 - ','')}"
            and o not in body]
 p(f"    身体网格 {len(body)} 个（带 Armature 修改器且未隐藏）；"
   f"其余 {len(skipped)} 个: {skipped[:8]}")
+
+# ============================================================
+# ★ 换皮肤（工作区副本新增）
+#   原理：BPS 的 Skin 材质只是一张 64x64 的 Steve.png，
+#         而所有网格的 UV 就是【标准 MC 皮肤布局】——
+#         所以把图像数据换成用户皮肤即可，UV 一个都不用动。
+# ============================================================
+if SKIN:
+    p(f"\n[4.5] 换皮肤 → {SKIN}")
+    if not os.path.exists(SKIN):
+        p(f"    !! 皮肤文件不存在，保持 Steve：{SKIN}")
+    else:
+        try:
+            tgt = None
+            for m in bpy.data.materials:
+                if m.name.split('.')[0] != "Skin" or not m.use_nodes:
+                    continue
+                for n in m.node_tree.nodes:
+                    if n.type == 'TEX_IMAGE' and n.image:
+                        tgt = n
+                        break
+                if tgt:
+                    break
+            if not tgt:
+                p("    !! 没找到挂图像的 Skin 材质节点，保持 Steve")
+            else:
+                old_name = tgt.image.name
+                old_size = tuple(tgt.image.size)
+                tmp = bpy.data.images.load(SKIN)
+                w, h = tmp.size
+                px = list(tmp.pixels)
+                newimg = bpy.data.images.new("用户皮肤", width=w, height=h,
+                                             alpha=True)
+                newimg.pixels = px
+                newimg.pack()
+                tgt.image = newimg
+                try:
+                    bpy.data.images.remove(tmp)
+                except Exception:
+                    pass
+                if old_name in bpy.data.images:
+                    try:
+                        bpy.data.images.remove(bpy.data.images[old_name])
+                    except Exception:
+                        pass
+                p(f"    皮肤已替换: {old_name} {old_size} → 用户皮肤 {w}x{h}")
+        except Exception as e:
+            p(f"    !! 换皮肤失败({type(e).__name__}: {e})，保持 Steve")
+
+# ============================================================
+# ★ 隐藏替身眼睛（工作区副本新增）
+#   理由：用户皮肤的脸（眼睛/眉毛）已经画在头部贴图上。
+#   BPS 自带 mesh eye.l/.r、mesh eyebrow.l/.r、mesh pupils.l/.r，
+#   它们是按【Steve 的眼位】摆放的独立几何 —— 不关掉会出现两套眼睛。
+#   只关'eye'与'pupil'，眉毛(eyebrow)保留（它们是可动附件，位置正常）。
+# ============================================================
+if SKIN:
+    hid = []
+    for o in bpy.data.objects:
+        if o.type != 'MESH':
+            continue
+        nm = o.name.replace('BPS v4 - ', '').lower()
+        if nm.startswith('mesh eye') or nm.startswith('mesh pupil'):
+            o.hide_render = True
+            hid.append(o.name.replace('BPS v4 - ', ''))
+    body = [o for o in body if not o.hide_render]
+    p(f"    已隐藏替身眼部 {len(hid)} 个: {hid}")
+
 cc = mathutils.Vector((WX, WY, GROUND))     # 放到世界 xy 中心的地面上
 bpy.context.view_layer.update()
 
@@ -310,6 +504,59 @@ if arm:
               f"→ 面朝 {'-Y（相机在 -Y，即【面向镜头】）' if fy < hy else '+Y（背对相机）'}")
 bpy.context.view_layer.update()
 
+# ============================================================
+# ★ 右臂握剑姿势（0.2.0 新增）
+#
+#   参考文献（本工作区实测 + 课程笔记）：
+#     ① 课程笔记 4.4：BPS V4 的手臂**默认是 FK**（IK 约束影响 = 0），
+#        摆姿势直接转 Top Arm.R / Bottom Arm.R / Hand.R 三根 pose bone；
+#        别去碰 Arm IK.R —— 那是切到 IK 才启用的控制器。
+#     ② 课程笔记 T11（Dynamic Parent）："剑握在手里 = 把剑绑到角色手上"，
+#        这里用 bone parent 到 Hand.R 等价实现（不用装插件）。
+#
+#   ⚠️ 坑 71：之前只做了②，没做① —— 手臂垂在胯边，1.4 格长的剑
+#   只能横在胸前，看起来就是"没握住"。摆完手臂再挂剑才对。
+# ============================================================
+def _rot3(s, default):
+    if not s:
+        return default
+    try:
+        v = tuple(float(x) for x in s.split(','))
+        return v if len(v) == 3 else default
+    except Exception:
+        return default
+
+
+ARM_POSE = os.environ.get('DSH_ARM_POSE', '1').lower() not in ('0', 'off', 'false')
+SHOULDER_ROT = _rot3(os.environ.get('DSH_ARM_SHOULDER'), (-40.0, 0.0, 42.0))
+ELBOW_ROT = _rot3(os.environ.get('DSH_ARM_ELBOW'), (-85.0, 0.0, 0.0))
+WRIST_ROT = _rot3(os.environ.get('DSH_ARM_WRIST'), (0.0, 0.0, 6.0))
+
+
+def pose_right_arm():
+    """把右臂摆成举剑姿势（FK，三根 pose bone）。"""
+    if not arm:
+        return False
+    names = ('Top Arm.R', 'Bottom Arm.R', 'Hand.R')
+    if not all(n in arm.pose.bones for n in names):
+        p("    !! 找不到 Top/Bottom Arm.R 或 Hand.R，跳过摆姿势")
+        return False
+    if not ARM_POSE:
+        p("    (DSH_ARM_POSE=0，保持默认站姿)")
+        return False
+    for name, rot in zip(names, (SHOULDER_ROT, ELBOW_ROT, WRIST_ROT)):
+        pb = arm.pose.bones[name]
+        pb.rotation_mode = 'XYZ'
+        pb.rotation_euler = tuple(math.radians(v) for v in rot)
+    bpy.context.view_layer.update()
+    p(f"    右臂：肩{SHOULDER_ROT} 肘{ELBOW_ROT} 腕{WRIST_ROT}（FK）")
+    return True
+
+
+p("\n[4.8] 摆右臂（FK，举剑）")
+pose_right_arm()
+bpy.context.view_layer.update()
+
 # ---- 钻石剑：用基向量构造矩阵 ----
 p("\n[5] 钻石剑挂 Hand.R（用刀刃方向构造旋转矩阵）")
 sw = []
@@ -334,55 +581,46 @@ if arm and any(b.name == 'Hand.R' for b in arm.data.bones):
     p(f"    对象自带: rot={tuple(round(v,3) for v in o.rotation_euler)} "
       f"scale={tuple(round(v,3) for v in o.scale)}  ← 会被 matrix_world 覆盖")
 
-    # 刀刃本地方向 = 对角 (1,1,0)；柄在 (-0.7,-0.7) 一侧
-    handle_local = mathutils.Vector((-0.55, -0.55, 0.04))
+    # 剑的本地几何：柄尾在 (-0.7,-0.7)，刀刃沿对角 (1,1,0) 到 (1.3,1.3)
+    POMMEL = mathutils.Vector((-0.70, -0.70, 0.04))
+    BLADE_DIR = mathutils.Vector((1.0, 1.0, 0.0)).normalized()
     K = 0.5                                   # 网格对角 2.83 → 成品约 1.4
 
-    # 目标世界朝向：刀刃朝【上 + 明显偏外 + 略朝镜头】
+    # ★ 坑 72：握持 ≠ 托着。
+    #   把【柄尾】对准掌心，整把剑都在拳头上方 → 看着像用手托着。
+    #   正确做法是沿刃方向把剑往下沉 SINK，让拳头包住一段柄：
+    #   柄尾从拳下露出、刀刃从拳上伸出，手和剑真正"咬合"。
+    #   0.55 本地单位 ≈ 0.27 方块，正好是 MC 手臂方块的一半高度。
+    SINK = float(os.environ.get('DSH_SWORD_SINK', '0.55'))
+    anchor = POMMEL + BLADE_DIR * SINK
+
+    # 目标世界朝向：刀刃朝【上 + 略偏外 + 略朝镜头】
     # ⚠️ 坑 56（两次）：① 太偏 -Y 会从正面盖住脸；
     #   ② 偏 +X 不够时，剑尖仍停在头部范围内。
-    #   手在身体侧面只有 0.34 格空间，而剑长 1.4 格 —— 必须给足侧向分量，
-    #   剑尖才能让开头部（头 x 范围约 -1862.83~-1862.17）。
-    blade_w = mathutils.Vector((1.25, -0.42, 1.0))
-    normal_w = mathutils.Vector((0.25, -0.96, 0.0))
+    # 现在手臂已经抬起来（[4.8]），手在肩高、离头 0.4 格左右，
+    # 只要保持"竖直 + 一点点外倾"就不会糊脸。
+    blade_w = mathutils.Vector((0.42, -0.22, 1.0))
+    normal_w = mathutils.Vector((0.12, -0.99, 0.0))
     R = basis_from(blade_w, normal_w).to_4x4()
 
-    # ★ 坑 55：不要用 pb.tail 当抓握点。
-    #   BPS V4 的 Hand.R 骨骼：head z=66.50 → tail z=66.17（还在手臂网格【下面】0.33）。
-    #   手臂网格 z[66.50, 67.25] 才是整条手臂，【手 = 网格底部中心 z=66.50】。
-    #   用 tail 会把剑柄放到大腿高度，看起来就是"没握在手上"。
-    arm_mesh = None
-    for x in char:
-        n = x.name.lower()
-        if x.type == 'MESH' and 'mesh arm' in n and 'slim' not in n \
-                and 'layer' not in n and n.rstrip().endswith('.r'):
-            arm_mesh = x
-            break
-    if arm_mesh is None:
-        for x in char:
-            n = x.name.lower()
-            if x.type == 'MESH' and 'mesh arm' in n and 'slim' not in n and 'layer' not in n:
-                arm_mesh = x
-                break
-    if arm_mesh is not None:
-        amn, amx = bbox([arm_mesh])
-        grip = mathutils.Vector(((amn.x + amx.x) / 2.0,
-                                 (amn.y + amx.y) / 2.0,
-                                 amn.z))          # 网格底部 = 拳头
-        p(f"    右臂网格 {arm_mesh.name}")
-        p(f"      z[{amn.z:.2f},{amx.z:.2f}] x[{amn.x:.2f},{amx.x:.2f}] "
-          f"y[{amn.y:.2f},{amx.y:.2f}]")
-        p(f"    抓握点（拳头=网格底部中心） {tuple(round(v,2) for v in grip)}")
-    else:
-        pb = arm.pose.bones['Hand.R']
-        grip = (arm.matrix_world @ mathutils.Matrix.Translation(pb.tail)).translation
-        p(f"    (没找到手臂网格，退回骨骼尾端) {tuple(round(v,2) for v in grip)}")
+    # ★ 坑 55 + 坑 71 的修正：
+    #   抓握点必须用【摆好姿势之后】的 Hand.R 骨（pose bone），
+    #   不能用网格 bbox —— bbox 不含骨架形变，手抬起来它还停在原位。
+    #   取手骨中点（拳头几何中心），再让柄沿刃向沉 SINK 进去。
+    pb = arm.pose.bones['Hand.R']
+    head_w = arm.matrix_world @ pb.head
+    tail_w = arm.matrix_world @ pb.tail
+    grip = (head_w + tail_w) / 2.0
+    p(f"    Hand.R 头 {tuple(round(v,2) for v in head_w)} "
+      f"尾 {tuple(round(v,2) for v in tail_w)}")
+    p(f"    抓握点（手骨中点） {tuple(round(v,2) for v in grip)}  "
+      f"剑柄下沉 {SINK}（本地）≈ {SINK * K:.2f} 方块")
     hand_pos = grip
 
     M = (mathutils.Matrix.Translation(hand_pos)
          @ R
          @ mathutils.Matrix.Scale(K, 4)
-         @ mathutils.Matrix.Translation(-handle_local))
+         @ mathutils.Matrix.Translation(-anchor))
     for x in sw:
         if x.parent is None:
             x.parent = arm
@@ -400,6 +638,132 @@ if arm and any(b.name == 'Hand.R' for b in arm.data.bones):
 else:
     p("    !! 没有 Hand.R")
 
+# ============================================================
+# ★ 自带模型（BYO models）—— 插件不附带任何模型 / 贴图
+#
+#   模型由使用者自备。推荐流程：
+#     python py/cli.py extract <资源目录> --out <输出目录>
+#   把 Bedrock 几何（.geo.json + 贴图）批量转成 OBJ，再指进来：
+#     ① DSH_MODELS=/path/models.json     数量不限，字段见 py/model_spec.py
+#     ② DSH_MODEL1_OBJ / DSH_MODEL2_OBJ / DSH_MODEL3_OBJ   三个槽位
+#   旧前缀（v0.1.x）仍然兼容，日志里会提示迁移，下个主版本移除。
+# ============================================================
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from model_spec import collect as collect_models    # noqa: E402
+
+
+def import_model(idx, cfg):
+    """把一个 OBJ 模型放进场景：先摆朝向和缩放，最后按包围盒落地。"""
+    obj_path = cfg["obj"]
+    name = cfg["name"]
+    zoff = cfg["z"]
+    if not obj_path or not os.path.exists(obj_path):
+        p(f"    [模型 {idx}] !! 找不到 {obj_path or '(空)'}")
+        return None
+    p(f"    [模型 {idx}] {name} 加载中…")
+    op = (getattr(bpy.ops.wm, "obj_import", None)
+          or getattr(bpy.ops.import_scene, "obj", None))
+    op(filepath=obj_path)
+    got = [o for o in bpy.context.selected_objects if o.type == 'MESH']
+    if not got:
+        p(f"    [模型 {idx}] !! OBJ 导入后没有网格")
+        return None
+    bpy.ops.object.select_all(action='DESELECT')
+    for o in got:
+        o.select_set(True)
+    bpy.context.view_layer.objects.active = got[0]
+    if len(got) > 1:
+        bpy.ops.object.join()
+    mo = bpy.context.view_layer.objects.active
+
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    try:
+        bpy.ops.mesh.normals_make_consistent(inside=False)
+    except Exception:
+        pass
+    bpy.ops.object.mode_set(mode='OBJECT')
+    bpy.ops.object.shade_flat()
+
+    # ★ 关键：OBJ 导入器会带一个 Y-up→Z-up 的旋转。
+    #   必须先把它烘焙进网格，否则下面设 rotation_euler 会把它覆盖掉 →
+    #   模型躺倒、落地高度全错（实测底 z 比地面低 1.65 格）。
+    bpy.ops.object.select_all(action='DESELECT')
+    mo.select_set(True)
+    bpy.context.view_layer.objects.active = mo
+    try:
+        bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+    except Exception as e:
+        p(f"    !! transform_apply 失败: {e}")
+
+    tex = cfg.get("tex") or ""
+    if tex and os.path.exists(tex):
+        img = bpy.data.images.load(tex)
+        mat = bpy.data.materials.new(f"Model{idx}")
+        mat.use_nodes = True
+        nt_ = mat.node_tree
+        for n in list(nt_.nodes):
+            nt_.nodes.remove(n)
+        o_ = nt_.nodes.new("ShaderNodeOutputMaterial")
+        b_ = nt_.nodes.new("ShaderNodeBsdfPrincipled")
+        t_ = nt_.nodes.new("ShaderNodeTexImage")
+        t_.image = img
+        t_.interpolation = 'Closest'
+        nt_.links.new(t_.outputs['Color'], b_.inputs['Base Color'])
+        b_.inputs['Roughness'].default_value = 0.78
+        try:
+            nt_.links.new(t_.outputs['Alpha'], b_.inputs['Alpha'])
+            mat.blend_method = 'CLIP'
+        except Exception:
+            pass
+        nt_.links.new(b_.outputs['BSDF'], o_.inputs['Surface'])
+        mo.data.materials.clear()
+        mo.data.materials.append(mat)
+
+    # ★ 顺序很重要：先设【朝向】和【缩放】，最后才按包围盒算落地位移。
+    #   反过来做的话，转完朝向包围盒会变，落地就算错了。
+    mo.rotation_euler = (0, 0, math.radians(cfg["yaw"]))
+    mo.scale = (cfg["scale"], cfg["scale"], cfg["scale"])
+    bpy.context.view_layer.update()
+    bb = [mo.matrix_world @ mathutils.Vector(c) for c in mo.bound_box]
+    bx = [v.x for v in bb]
+    by = [v.y for v in bb]
+    bz = [v.z for v in bb]
+    p(f"    [模型 {idx}] {name} 尺寸 {(max(bx)-min(bx)):.2f} x "
+      f"{(max(by)-min(by)):.2f} x {(max(bz)-min(bz)):.2f} 方块")
+
+    # ⚠️ fw/_right 在后面的相机段才定义，所以这里自己按 CAM_AZ 算一份
+    _az_ = math.radians(CAM_AZ)
+    _fwd = mathutils.Vector((math.cos(_az_), -math.sin(_az_), 0.0)).normalized()
+    _rgt = mathutils.Vector((_fwd.y, -_fwd.x, 0.0)).normalized()
+
+    tgt = (mathutils.Vector((WX, WY, GROUND + zoff))
+           + _fwd * cfg["back"] + _rgt * cfg["side"])
+    dx_ = tgt.x - (min(bx) + max(bx)) / 2
+    dy_ = tgt.y - (min(by) + max(by)) / 2
+    dz_ = tgt.z - min(bz)
+    mo.location = (mo.location.x + dx_, mo.location.y + dy_,
+                   mo.location.z + dz_)
+    bpy.context.view_layer.update()
+    bb2 = [mo.matrix_world @ mathutils.Vector(c) for c in mo.bound_box]
+    bz2 = [v.z for v in bb2]
+    ok_ground = abs(min(bz2) - (GROUND + zoff)) < 0.05
+    p(f"    [模型 {idx}] {name} 落位 ({tgt.x:.1f},{tgt.y:.1f}) "
+      f"底z={min(bz2):.2f}(目标{GROUND + zoff:.2f})"
+      f"{'✓' if ok_ground else '✗'} 高{max(bz2)-min(bz2):.2f}格 "
+      f"缩放{cfg['scale']} 背后{cfg['back']} 侧偏{cfg['side']}")
+    return mo
+
+
+bpy.context.view_layer.update()
+_models, _model_notes = collect_models()
+for _n in _model_notes:
+    p(f"    ⚠️  {_n}")
+if _models:
+    p(f"\n[5.5] 自带模型 {len(_models)} 个")
+for _i, _cfg in enumerate(_models, 1):
+    import_model(_i, _cfg)
+
 # ---- 天空 ----
 p("\n[6] Blender 物理天空")
 world = bpy.context.scene.world or bpy.data.worlds.new("MCWorld")
@@ -415,8 +779,8 @@ for k in ('MULTIPLE_SCATTERING', 'NISHITA', 'HOSEK_WILKIE', 'PREETHAM'):
     try:
         sky = nt.nodes.new("ShaderNodeTexSky")
         sky.sky_type = k
-        sky.sun_elevation = math.radians(45)
-        sky.sun_rotation = math.radians(215) - math.pi / 2
+        sky.sun_elevation = math.radians(SUN_ELEV)
+        sky.sun_rotation = math.radians(SUN_ROT) - math.pi / 2
         sky.sun_disc = True
         for attr, val in (("altitude", 120.0), ("air_density", 1.0),
                           ("dust_density", 0.5), ("ozone_density", 1.0)):
@@ -437,12 +801,13 @@ if kind is None:
 bg.inputs['Strength'].default_value = SKY
 nt.links.new(bg.outputs['Background'], out.inputs['Surface'])
 sd = bpy.data.lights.new("SunKey", type='SUN')
-sd.energy = 3.5
+sd.energy = SUN_INT
 sd.angle = math.radians(2.5)
 so = bpy.data.objects.new("SunKey", sd)
 bpy.context.scene.collection.objects.link(so)
-so.rotation_euler = (math.radians(90 - 45), 0, math.radians(215 + 90))
-p(f"    {kind or '平涂蓝'}  太阳仰角 45° 方位 215°  强度 3.5  天空强度 {SKY}")
+so.rotation_euler = (math.radians(90 - SUN_ELEV), 0, math.radians(SUN_ROT + 90))
+p(f"    {kind or '平涂蓝'}  太阳仰角 {SUN_ELEV:.0f}° 方位 {SUN_ROT:.0f}°  "
+  f"强度 {SUN_INT}  天空强度 {SKY}")
 # ⚠️ 坑 53/57：视图转换与天空强度必须配套 ——
 #   「标准」没有高光压缩，物理天空（辐射度量）哪怕强度 0.12 也会削顶成白，
 #   整个动态范围被天空占满，三点布光完全显不出来（= "背景死白 + 没有光源"）。
@@ -470,18 +835,18 @@ def area(name, loc, rot, energy, size):
 
 
 area("Key", (WX + 3.5, WY - 3.8, GROUND + 5.0),
-     (math.radians(50), 0, math.radians(42)), 320.0, 3.0)
+     (math.radians(50), 0, math.radians(42)), 320.0 * KEY_SCALE, 3.0)
 area("Fill", (WX - 4.2, WY - 2.6, GROUND + 2.8),
-     (math.radians(74), 0, math.radians(-58)), 140.0, 5.5)
+     (math.radians(74), 0, math.radians(-58)), 140.0 * KEY_SCALE, 5.5)
 area("Rim", (WX - 0.5, WY + 3.8, GROUND + 3.6),
-     (math.radians(80), 0, math.radians(188)), 420.0, 3.0)
-p("    Key 320 / Fill 140 / Rim 420（T48 的 100:50:110 比例，"
-  "整体抬高以在有压缩的视图转换下生效）")
+     (math.radians(80), 0, math.radians(188)), 420.0 * KEY_SCALE, 3.0)
+p(f"    Key {320*KEY_SCALE:.0f} / Fill {140*KEY_SCALE:.0f} / "
+  f"Rim {420*KEY_SCALE:.0f}（倍率 {KEY_SCALE}，黄昏逆光时调小）")
 
 # ---- 相机 ----
 p("\n[8] 相机")
 cam_d = bpy.data.cameras.new("Cam")
-cam_d.lens = LENS
+cam_d.lens = (LENS_OVR if LENS_OVR > 0 else LENS)
 cam = bpy.data.objects.new("Cam", cam_d)
 bpy.context.scene.collection.objects.link(cam)
 bpy.context.scene.camera = cam
@@ -493,9 +858,9 @@ fw = mathutils.Vector((_mc[0], -_mc[1], 0.0)).normalized()   # 视线水平方�
 _right = mathutils.Vector((fw.y, -fw.x, 0.0)).normalized()   # 视线右方
 cam.location = (mathutils.Vector((WX, WY, GROUND))
                 - fw * DIST
-                + mathutils.Vector((0.0, 0.0, 2.45)))
+                + mathutils.Vector((0.0, 0.0, CAM_H)))
 # 看向点往视线右方偏 → 角色落在画面左侧，右侧留白给文字
-look = (mathutils.Vector((WX, WY, GROUND + 1.05)) + _right * 0.9)
+look = (mathutils.Vector((WX, WY, GROUND + AIM_H)) + _right * AIM_SIDE)
 cam.rotation_euler = (look - cam.location).to_track_quat('-Z', 'Y').to_euler()
 p(f"    {LENS:.0f}mm  视线方位 {CAM_AZ:.0f}°(MC)  距离 {DIST}")
 p(f"    位置 {tuple(round(v,2) for v in cam.location)}  "
@@ -532,10 +897,10 @@ for cand in ('BLENDER_EEVEE_NEXT', 'BLENDER_EEVEE'):
     except Exception:
         continue
 try:
-    scn.eevee.taa_render_samples = 256
+    scn.eevee.taa_render_samples = SAMPLES
 except Exception:
     pass
-scn.render.resolution_x, scn.render.resolution_y = 1280, 720
+scn.render.resolution_x, scn.render.resolution_y = RES_X, RES_Y
 scn.render.film_transparent = False
 vt = None
 for v in (VT, 'Filmic', 'AgX', 'Standard'):
@@ -545,11 +910,11 @@ for v in (VT, 'Filmic', 'AgX', 'Standard'):
         break
     except Exception:
         continue
-scn.view_settings.exposure = 0.0
+scn.view_settings.exposure = EXPOSURE
 scn.view_settings.look = 'None'
 scn.render.filepath = os.path.join(OUT, "封面_世界")
 scn.render.image_settings.file_format = 'PNG'
-p(f"    {scn.render.engine} / 256 采样 / 视图转换={vt} / 1280x720")
+p(f"    {scn.render.engine} / {SAMPLES} 采样 / 视图转换={vt} / {RES_X}x{RES_Y}")
 
 blend = os.path.join(OUT, "封面_世界.blend")
 bpy.ops.wm.save_as_mainfile(filepath=blend)

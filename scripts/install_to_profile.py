@@ -16,7 +16,10 @@ PKG = os.path.join(PROF, 'package.json')
 YML = os.path.join(PROF, 'cordis.patch.yml')
 
 NAME = 'dsh-blender-mc'
-VER = '^0.1.1'
+PKG_SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       'package.json')
+with open(PKG_SRC, encoding='utf-8') as f:
+    VER = '^' + json.load(f)['version']
 
 # ── 本机路径 ──────────────────────────────────────
 WS = r'E:\游戏与自媒体\AI自媒体工作区'

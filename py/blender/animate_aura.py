@@ -158,17 +158,24 @@ pose = arm.pose.bones
 
 
 def key_bone(name, frames):
-    """frames: [(frame, (rx,ry,rz) 度, (sx,sy,sz) 可选)]"""
+    """frames: [(frame, (rx,ry,rz) 度, (sx,sy,sz) 可选)]
+
+    ★ 0.2.0：关键帧是【相对封面工程的静态姿势】的增量。
+      封面里右臂已经被摆成举剑姿势（build_cover 的 [4.8]），
+      如果这里写绝对值，第一帧就会把手臂打回垂手，剑又横在胸前。
+    """
     pb = pose.get(name)
     if pb is None:
         p(f"    !! 没有骨骼 {name}")
         return
     pb.rotation_mode = 'XYZ'
+    base = tuple(pb.rotation_euler)      # 当前静态姿势（没有摆过就是 0）
     for item in frames:
         f, rot = item[0], item[1]
-        pb.rotation_euler = tuple(math.radians(v) for v in rot)
+        pb.rotation_euler = tuple(base[i] + math.radians(rot[i]) for i in range(3))
         pb.keyframe_insert('rotation_euler', frame=f)
-    p(f"    {name}: {len(frames)} 个关键帧")
+    p(f"    {name}: {len(frames)} 个关键帧（基准 "
+      f"{tuple(round(math.degrees(v), 1) for v in base)}°）")
 
 
 def key_obj(obj, path, frames, is_rot=False, is_scale=False):

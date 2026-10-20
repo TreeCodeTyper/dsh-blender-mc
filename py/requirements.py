@@ -69,7 +69,8 @@ REQUIREMENTS = {
                '变成能渲染的 PBR 材质，并自动做【生物群系染色】'
                '（草和树叶的贴图是灰度的，绿色是运行时乘上去的）',
         'without': '世界会渲染成灰白或纯色 —— 草地不会变绿，贴图也可能丢失。'
-                   '能出图，但基本不能用',
+                   '0.2.0 起会自动走「内置材质兜底」（贴图 + 群系染色 + 调平材质），'
+                   '能出可用的图，但草的层次不如 MCprep 细',
         'required': True,
         'where': 'https://github.com/Moo-Ack-Productions/MCprep',
         'how': [
@@ -199,6 +200,44 @@ def _has_mcprep(blender_exe):
         return None
 
 
+def probe_mcprep_operator(blender_exe=None):
+    """真探一次 MCprep 的 prep_materials 操作符是否可用。
+
+    ⚠️ 装目录里有 ≠ addon 注册成功。实测：addon 注册时要写 tracker.json，
+    写盘被拒会中断 register()，结果 bpy.ops.mcprep.* 全部消失 ——
+    只看目录会误报"已安装"，渲染时才发现草是灰的。
+    返回 True / False / None（无法判断）
+    """
+    exe = _find_blender(blender_exe)
+    if not exe:
+        return None
+    expr = (
+        "import bpy, addon_utils\n"
+        "try:\n"
+        "    addon_utils.enable('MCprep_addon', default_set=True)\n"
+        "except Exception:\n"
+        "    pass\n"
+        "try:\n"
+        "    bpy.ops.mcprep.prep_materials.get_rna_type()\n"
+        "    print('MCPREP_OP_OK')\n"
+        "except Exception as e:\n"
+        "    print('MCPREP_OP_FAIL', e)\n"
+    )
+    try:
+        r = subprocess.run([exe, '-b', '--factory-startup',
+                            '--python-expr', expr],
+                           capture_output=True, text=True, encoding='utf-8',
+                           errors='replace', timeout=180)
+    except Exception:
+        return None
+    out = (r.stdout or '') + (r.stderr or '')
+    if 'MCPREP_OP_OK' in out:
+        return True
+    if 'MCPREP_OP_FAIL' in out:
+        return False
+    return None
+
+
 def _addon_dirs():
     out = []
     appdata = os.environ.get('APPDATA')
@@ -244,6 +283,11 @@ def check_all(blender=None):
 def format_report(blender=None, verbose=False):
     """人类可读的检查报告。缺什么就把完整安装指引打出来。"""
     res = check_all(blender)
+    # ★ MCprep 装目录在 ≠ 操作符可用：真跑一次 Blender 探测（约 5-10 秒）。
+    #   探测失败只加一行警告，不把整项判死 —— 0.2.0 起有内置材质兜底。
+    op_ok = None
+    if any(k == 'mcprep' and ok for k, ok, _, _ in res):
+        op_ok = probe_mcprep_operator(blender)
     lines = []
     missing_required = []
     missing_optional = []
@@ -254,6 +298,9 @@ def format_report(blender=None, verbose=False):
     for key, ok, detail, spec in res:
         mark = '✅' if ok else ('❌' if spec['required'] else '⚠️ ')
         lines.append(f'  {mark} {spec["label"]:<34} {detail}')
+        if key == 'mcprep' and ok and op_ok is False:
+            lines.append('      ⚠️  prep_materials 操作符没注册上（addon 加载中断）——'
+                         ' 渲染会自动走内置材质兜底，草色略平')
         if not ok:
             (missing_required if spec['required'] else missing_optional).append(
                 (key, spec))

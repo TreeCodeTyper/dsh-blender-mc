@@ -168,6 +168,9 @@ python py/cli.py doctor
 # 装配外部资产
 python py/cli.py setup [资源目录...] [--dry-run]
 
+# 提取你自己资源包里的模型（Bedrock 几何 → OBJ，插件不带任何素材）
+python py/cli.py extract <资源目录> --out <目录> [--list] [--filter 关键词]
+
 # 在存档里找机位（按「开阔度」排序）
 python py/cli.py scan <存档> --area x0,x1,z0,z1
 
@@ -191,7 +194,25 @@ python py/cli.py check <图...> [--json]
 
 > 把出好的封面做成 10 秒动画
 
-模型会自己判断该调哪个工具（`mc_doctor` / `mc_scan` / `mc_shoot` / `mc_anim` / `mc_check`）。
+模型会自己判断该调哪个工具（`mc_doctor` / `mc_extract_models` / `mc_scan` / `mc_shoot` / `mc_anim` / `mc_check`）。
+
+### 自带模型（可选）
+
+插件**不附带任何模型或贴图**。要把自己的模型摆进封面，三步：
+
+```bash
+# ① 提取：把你的资源包里的 Bedrock 几何转成 OBJ（先 --list 看会转什么）
+python py/cli.py extract "D:\资源包解包目录" --out .\模型 --filter barrel
+
+# ② 指路径：描述文件（数量不限）或三个槽位环境变量
+$env:DSH_MODELS = "D:\模型\models.json"
+# 或 $env:DSH_MODEL1_OBJ / _TEX / _SCALE / _BACK / _SIDE / _Z / _YAW
+
+# ③ 正常出图，模型会按参数站在场景里
+python py/cli.py shoot "D:/saves/我的世界" --area -2100,-1600,-1400,-900 --out ./出图
+```
+
+细节（参数表、常见问题、授权注意）见 **[自带模型](docs/自带模型.md)**。
 
 ### 常用参数
 
@@ -214,22 +235,28 @@ python py/cli.py check <图...> [--json]
 ① scan     读 .mca → 每列最高方块 → 找成片同高度平地 → 排除视线遮挡 → 推荐机位
 ② export   机位周围导出 OBJ（材质名 = MC 贴图名，供 MCprep 识别）
 ③ build    调 Blender：导入世界 → mcprep.prep_materials（含生物群系染色）
-           → 追加角色集合 → 手持物品挂 Hand.R → 物理天空 → 三点布光 → 相机
+           → 追加角色集合 → 手持物品挂 Hand.R → 自带模型落位 → 物理天空 → 三点布光 → 相机
 ④ render   EEVEE 渲染
 ⑤ check    OpenCV 审图 → 不合格回 ③ 改参数（最多 N 轮）
 ⑥ anim     （可选）骨骼关键帧 + 旋转光环 + 斩击弧光
 ⑦ convert  ffmpeg 转 MP4 / GIF
 ```
 
+> 自带模型走的是独立支线：`extract`（Bedrock 几何 → OBJ，`py/bedrock.py`）
+> → `build` 阶段按 `DSH_MODELS` / `DSH_MODEL1_*` 落位。
+
 ### 目录结构
 
 ```
 dsh-blender-mc/
-├── lib/index.js              DSH 插件外壳：注册 6 个工具，调 Python
+├── lib/index.js              DSH 插件外壳：注册 7 个工具，调 Python
 ├── py/
 │   ├── cli.py                命令行入口
 │   ├── pipeline.py           ★ 编排 + 审图闭环 + auto_adjust
 │   ├── vision_check.py       ★ OpenCV 审图
+│   ├── bedrock.py            Bedrock 几何（.geo.json）→ OBJ
+│   ├── extract.py            批量提取模型 + 猜贴图 + 写清单
+│   ├── model_spec.py         自带模型的入参解析（DSH_MODELS / DSH_MODEL1_*）
 │   ├── requirements.py       运行条件检查 + 安装指引
 │   ├── setup_assets.py       外部资产装配
 │   ├── scan.py               找机位
@@ -237,9 +264,9 @@ dsh-blender-mc/
 │   └── blender/
 │       ├── _compat.py        ★ Blender 版本兼容层
 │       ├── export_obj.py     存档 → OBJ
-│       ├── build_cover.py    搭场景 + 渲染
+│       ├── build_cover.py    搭场景 + 渲染（含自带模型落位）
 │       └── animate_aura.py   杀戮光环动画
-├── docs/                     使用教程 / 架构 / 发布指南
+├── docs/                     使用教程 / 自带模型 / 发布指南
 └── vendor/                   ← 装配出来的第三方资产（.gitignore 排除）
 ```
 
@@ -370,6 +397,10 @@ git push origin feat/你的功能名
 [MIT](LICENSE) —— 覆盖本仓库自身的代码与文档。
 
 运行时需要的第三方资产**不由本项目分发**，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+**模型与贴图同理**：插件只提供格式转换和摆放能力，不带任何模型 / 贴图，
+也不内置任何作品名。你用自己的素材进场景，素材授权请自行确认
+（见 [自带模型 · 授权与合规](docs/自带模型.md#授权与合规)）。
 
 > 本项目与 Mojang Studios、Microsoft 无任何隶属或背书关系。
 > "Minecraft" 是 Mojang Studios 的商标。

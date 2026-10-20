@@ -42,10 +42,10 @@ DEFAULTS = {
 }
 
 
-def run(cmd, log=None, timeout=None, cwd=None):
+def run(cmd, log=None, timeout=None, cwd=None, env=None):
     """跑外部命令。返回 (rc, stdout+stderr)"""
     p = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8',
-                       errors='replace', timeout=timeout, cwd=cwd)
+                       errors='replace', timeout=timeout, cwd=cwd, env=env)
     out = (p.stdout or '') + (p.stderr or '')
     if log:
         with open(log, 'a', encoding='utf-8') as f:
@@ -176,27 +176,57 @@ def step_export(save, area, center, out_dir, blender=None, radius=44,
     return obj
 
 
+def _png_size(path):
+    """读 PNG 头拿真实尺寸（用来核对"说的分辨率"和"出的图"是否一致）。"""
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(24)
+        if head[:8] != b'\x89PNG\r\n\x1a\n':
+            return None
+        w = int.from_bytes(head[16:20], 'big')
+        h = int.from_bytes(head[20:24], 'big')
+        return w, h
+    except Exception:
+        return None
+
+
 def step_render(blender_exe, obj, out_dir, params, progress=print):
-    """③ 用 Blender 搭场景并渲染"""
+    """③ 用 Blender 搭场景并渲染
+
+    ★ 分辨率 / 采样走环境变量：build_cover.py 里的 DSH_RES_X/Y 和 DSH_SAMPLES。
+      之前 params['res'] 完全没接线 —— 结果.json 写 1280x720，实际出 960x540。
+    """
     script = os.path.join(BLENDER_DIR, 'build_cover.py')
     args = [blender_exe, '-b', '--factory-startup', '--python', script, '--',
             obj, out_dir,
             str(params['yaw']), str(params['lens']), params['view_transform'],
             str(params['sky_strength']), str(params['cam_az']), str(params['dist']),
             str(params['sink'])]
+    env = dict(os.environ)
+    res = str(params.get('res') or '').lower().replace('×', 'x')
+    if 'x' in res:
+        try:
+            w, h = (int(v) for v in res.split('x')[:2])
+            env['DSH_RES_X'] = str(w)
+            env['DSH_RES_Y'] = str(h)
+        except ValueError:
+            progress(f'    ⚠️ 分辨率写法不认识: {params.get("res")}，用默认')
+    env['DSH_SAMPLES'] = str(int(params.get('samples', 256)))
     t0 = time.time()
-    rc, out = run(args, log=os.path.join(out_dir, '_build.log'))
+    rc, out = run(args, log=os.path.join(out_dir, '_build.log'), env=env)
     if rc != 0:
         raise RuntimeError(f'搭场景失败\n{out[-2000:]}')
     blend = os.path.join(out_dir, '封面_世界.blend')
     if not os.path.isfile(blend):
         raise RuntimeError(f'没生成 .blend\n{out[-2000:]}')
     rc, out = run([blender_exe, '-b', blend, '-f', '1'],
-                  log=os.path.join(out_dir, '_render.log'))
+                  log=os.path.join(out_dir, '_render.log'), env=env)
     png = os.path.join(out_dir, '封面_世界0001.png')
     if not os.path.isfile(png):
         raise RuntimeError(f'渲染没出图\n{out[-2000:]}')
-    progress(f'    渲染完成 {time.time()-t0:.1f}s: {png}')
+    size = _png_size(png)
+    progress(f'    渲染完成 {time.time()-t0:.1f}s: {png}'
+             + (f'  ({size[0]}x{size[1]})' if size else ''))
     return blend, png
 
 
@@ -283,6 +313,9 @@ def shoot(save, area, out_root, blender=None, params=None, center=None,
     返回 {'shot':…, 'params':…, 'png':…, 'blend':…, 'report':…, 'attempts':[…]}
     """
     os.makedirs(out_root, exist_ok=True)
+    # ⚠️ 输出目录必须转绝对路径：Blender 拿到的相对路径是按【工程/工作目录】解析的，
+    #   写不进去就只报 "No such file or directory"，图白渲一遍（实测踩到）。
+    out_root = os.path.abspath(out_root)
     p = dict(DEFAULTS)
     p.update(params or {})
 
@@ -362,9 +395,18 @@ def shoot(save, area, out_root, blender=None, params=None, center=None,
         p = nxt
 
     final = history[-1]
+    size = _png_size(final['png'])
+    res_req = final['params'].get('res')
+    res_actual = f'{size[0]}x{size[1]}' if size else None
+    if size and res_req:
+        want = str(res_req).lower().replace('×', 'x').replace(' ', '')
+        if want != res_actual:
+            progress(f'    ⚠️ 分辨率不一致：请求 {want}，实际 {res_actual}')
     result = {'center': center, 'params': final['params'], 'png': final['png'],
               'blend': final['blend'], 'verdict': final['verdict'],
               'score': final['score'], 'issues': final['issues'],
+              'res_requested': res_req, 'res_actual': res_actual,
+              'finished_at': time.strftime('%Y-%m-%d %H:%M:%S'),
               'attempts': history}
     with open(os.path.join(out_root, '结果.json'), 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
@@ -373,10 +415,15 @@ def shoot(save, area, out_root, blender=None, params=None, center=None,
 
 def animate(blender_exe, blend, out_dir, total=240, fps=24, kind='aura',
             preview=None, progress=print):
-    """在封面工程上做动画（默认杀戮光环），再导出 MP4/GIF"""
+    """在封面工程上做动画（默认杀戮光环）。
+
+    只渲【帧序列】：插件不替你合成视频 —— 转 MP4/GIF 需要用 ffmpeg，
+    命令会由 cli 打印出来（见 cmd_anim）。
+    """
     script = os.path.join(BLENDER_DIR, 'animate_aura.py' if kind == 'aura'
                           else 'animate_aura.py')
     os.makedirs(out_dir, exist_ok=True)
+    out_dir = os.path.abspath(out_dir)      # 同上：相对路径 Blender 会写不进去
     args = [blender_exe, '-b', blend, '--python', script, '--',
             out_dir, str(total), str(fps), preview or '']
     rc, out = run(args, log=os.path.join(out_dir, '_anim.log'))
