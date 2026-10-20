@@ -123,9 +123,14 @@ DSH → 设置 → 插件市场 → 搜索 `dsh-blender-mc` → 安装 → **开
 **方式 B：命令行装（推荐给要配本机路径的人）**
 
 ```bash
-dsh plugin --profile desktop add dsh-blender-mc
+dsh plugin --profile desktop add dsh-blender-mc@0.2.1
 python scripts/install_to_profile.py --profile desktop   # 写本机路径配置（可 --dry-run 预览）
 ```
+
+> **为什么写成 `@0.2.1`**：DSH 装包时有一层「新版本冷却期」（pnpm `minimumReleaseAge`），
+> 刚发布几个小时的版本不会自动被选中 —— 不带版本号时可能装到旧的 0.1.2，而那个版本在
+> DSH 0.2.0-rc.2 上 7 个工具全都注册不上。写死版本号会绕过冷却期（DSH 会把它记进
+> `minimumReleaseAgeExclude`）。等冷却期过了，不带版本号也能装到最新的。
 
 `install_to_profile.py` 会先备份、再改 profile 的 `cordis.patch.yml`，写前用 PyYAML 自查、
 写后用 `dsh <profile> --dump-config` 让 DSH 自己组合一遍 —— 这是 0.2.1 修掉的重点，
