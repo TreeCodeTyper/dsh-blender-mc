@@ -34,6 +34,9 @@ DECOR = ('_leaves', 'water', 'lava', 'seagrass', 'kelp', 'vine', 'carpet',
          'sugar_cane', 'snow_layer', 'short_grass', 'tall_grass', 'fern',
          'dead_bush', 'mushroom', 'lily_pad', 'cobweb', 'roots', 'azalea')
 
+# 液面：这些方块盖在地面上方时，这一列不能站人（水下 / 岩浆里）
+WATERISH = ('water', 'lava', 'ice', '_ice')
+
 
 def _is_decor(name):
     if name in ('short_grass', 'tall_grass', 'fern', 'dead_bush', 'sugar_cane'):
@@ -42,18 +45,48 @@ def _is_decor(name):
 
 
 def surface_map(world, x0, x1, z0, z1, y0=50, y1=200, progress=None):
-    """取每列的最高方块。返回 {(x,z): (y, 方块名)}"""
+    """取每列的最高方块。返回 {(x,z): (y, 方块名)}
+
+    ★ 坑：水也是 DECOR，所以「湖底/海底」的列会退回到下面的沙子/石头，
+      被当成可站立地面 —— 于是机位选中一片湖，人物站在水面上，
+      背景是一整片没有纹理的水面（实测 方可梦世界 的 247,-8 就是湖面）。
+      → 记下每列最高的水面高度，最后把「水面高于地表」的列整列丢掉。
+    """
     top = {}
+    wet = {}
+    top_any = {}
     n = 0
     for (x, y, z, name) in world.iter_blocks(x0=x0, x1=x1, z0=z0, z1=z1, y0=y0, y1=y1):
-        if _is_decor(name):
-            continue
         k = (x, z)
+        if name and not name.endswith('air'):
+            if y > top_any.get(k, -9999):
+                top_any[k] = y
+        if _is_decor(name):
+            if name.endswith(WATERISH):
+                if y > wet.get(k, -9999):
+                    wet[k] = y
+            continue
         if k not in top or y > top[k][0]:
             top[k] = (y, name)
         n += 1
         if progress and n % 200000 == 0:
             progress(f'      已读 {n} 个方块，{len(top)} 列')
+    dropped = 0
+    for k, wy in wet.items():
+        t = top.get(k)
+        if t is not None and wy >= t[0]:
+            del top[k]
+            dropped += 1
+    shaded = 0
+    for k, gy in list(top.items()):
+        hi = top_any.get(k)
+        if hi is not None and hi > gy[0] + 3:
+            del top[k]
+            shaded += 1
+    if progress and shaded:
+        progress(f'      剔除树冠/屋檐下 {shaded} 列（头顶 3 格内有方块）')
+    if progress and dropped:
+        progress(f'      剔除水下 {dropped} 列（水面高于地表，站不住）')
     return top
 
 
@@ -120,11 +153,54 @@ def openness(top, cx, cz, az_deg, ground_y, dist=42, half_deg=17, bounds=None,
     return 1.0 - blocked / max(1, total)
 
 
+def relief(top, cx, cz, az_deg, ground_y, dist=64, half_deg=32, bounds=None,
+           min_height=3):
+    """视野锥里「有东西」的比例（树 / 建筑 / 山），0~1。
+
+    ★ 只看开阔度会选到「最空的空地」——整合包地图上那往往是一片铺平的石砖广场，
+      人物站在中间，背景什么都没有（实测 方可梦世界 562,48 就是这样）。
+      真正像「一个世界」的机位是：视野里 3%~25% 有东西。
+    """
+    hit = total = 0
+    bx = bounds
+    for r in range(10, dist, 3):
+        for da in range(-half_deg, half_deg + 1, 6):
+            a = math.radians(az_deg + da)
+            x = int(round(cx + r * math.cos(a)))
+            z = int(round(cz + r * math.sin(a)))
+            total += 1
+            if bx and not (bx[0] <= x <= bx[1] and bx[2] <= z <= bx[3]):
+                continue                       # 范围外不参与评分
+            v = top.get((x, z))
+            if v is not None and v[0] > ground_y + min_height:
+                hit += 1
+    return hit / max(1, total)
+
+
+def _shot_score(openness_v, relief_v):
+    """机位综合分：开阔度落在 0.55~0.98 最舒服，背景有 3%~25% 的东西最像世界。"""
+    o = openness_v
+    if o > 0.98:
+        pen_o = (o - 0.98) * 250.0          # 一片空地：每 0.01 扣 2.5 分
+    elif o < 0.60:
+        pen_o = (0.60 - o) * 110.0          # 被围住：看不到天
+    else:
+        pen_o = 0.0
+    r = relief_v
+    if r < 0.03:
+        pen_r = (0.03 - r) * 900.0          # 背景空无一物
+    elif r > 0.25:
+        pen_r = (r - 0.25) * 260.0          # 糊满背景（树墙/建筑墙）
+    else:
+        pen_r = 0.0
+    return 100.0 - pen_o - pen_r
+
+
 def best_shots(top, bounds=None, radius=15, want_grass=True,
                az_step=30, top_n=12, min_open=0.80):
     """综合 ①②③ 给出推荐机位。
 
-    返回 [{x,z,y,az,openness,flat}]，按 (开阔度, 平坦格数) 降序
+    返回 [{x,z,y,az,openness,relief,score,flat}]，按 (综合分, 开阔度, 平坦格数) 降序
     """
     flats = find_open_ground(top, radius=radius, bounds=bounds, want_grass=want_grass)
     if not flats:
@@ -145,10 +221,13 @@ def best_shots(top, bounds=None, radius=15, want_grass=True,
     for x, z, y, cnt in picked:
         for az in range(0, 360, az_step):
             o = openness(top, x, z, az, y, bounds=bounds)
-            if o >= min_open:
-                shots.append({'x': x, 'z': z, 'y': y, 'az': az,
-                              'openness': round(o, 3), 'flat': cnt})
-    shots.sort(key=lambda s: (-s['openness'], -s['flat']))
+            if o < min_open:
+                continue
+            rl = relief(top, x, z, az, y, bounds=bounds)
+            shots.append({'x': x, 'z': z, 'y': y, 'az': az,
+                          'openness': round(o, 3), 'relief': round(rl, 3),
+                          'score': round(_shot_score(o, rl), 2), 'flat': cnt})
+    shots.sort(key=lambda s: (-s['score'], -s['openness'], -s['flat']))
     # 同一位置只留最好的一个方位角
     out, seen_pos = [], set()
     for s in shots:
@@ -218,12 +297,23 @@ def pick_from_save(save_dir, x0, x1, z0, z1, y0=50, y1=200,
     shots = best_shots(top, bounds=bounds, radius=radius, az_step=az_step,
                        top_n=top_n)
     if not shots:
+        # ★ 先坚持「草地」，只把面积要求一路放宽（6→2 格）；自然地面比铺好的广场好看得多。
+        #   只有连草地都找不到时，才允许站到石头/木板这些人工地面上。
+        for r, min_open in ((max(6, radius // 2), 0.55), (6, 0.50), (4, 0.35),
+                            (3, 0.25), (2, 0.20)):
+            shots = best_shots(top, bounds=bounds, radius=r, want_grass=True,
+                               az_step=az_step, top_n=top_n, min_open=min_open)
+            if shots:
+                if progress:
+                    progress(f'    没有 {radius}×{radius} 平整草地，放宽到 {r}×{r} 后找到 {len(shots)} 个机位')
+                break
+    if not shots:
         for r, min_open in ((max(6, radius // 2), 0.55), (4, 0.35), (2, 0.20)):
             shots = best_shots(top, bounds=bounds, radius=r, want_grass=False,
                                az_step=az_step, top_n=top_n, min_open=min_open)
             if shots:
                 if progress:
-                    progress(f'    没有 {radius}×{radius} 平整草地，放宽到 {r}×{r} 后找到 {len(shots)} 个机位')
+                    progress(f'    连草地都没有，改用「任意可站立地面」{r}×{r} → {len(shots)} 个机位')
                 break
     if not shots:
         if progress:

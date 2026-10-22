@@ -472,8 +472,8 @@ def read_level_dat(save_dir, limits=None):
     return info
 
 
-def suggest_area(bounds, spawn, half=240):
-    """给 mc_scan/mc_shoot 一个默认扫描区：以出生点为中心的方框，钳进 bounds。"""
+def suggest_area(bounds, spawn, half=384):
+    """给 mc_scan/mc_shoot 一个默认扫描区：以出生点为中心的方框，钳进 bounds。\n\n    ★ half 从 240 提到 384：出生点附近常常是玩家自己铺的广场/房子，\n      ±240 里挑不出像样的自然地形（实测 方可梦世界 只有 5 个候选，全是石砖广场）；\n      放大到 ±384 才能扫到草地/围墙/花丛那种"像个世界"的背景。\n    """""
     if not bounds:
         return None
     if spawn:

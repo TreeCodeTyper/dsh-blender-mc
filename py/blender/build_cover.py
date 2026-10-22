@@ -1013,6 +1013,65 @@ p(f"    {kind or '平涂蓝'}  太阳仰角 {SUN_ELEV:.1f}° 方位 {SUN_ROT:.0f
   f"灯强度 {SUN_INT} 色 {SUN_COLOR} 盘角 {SUN_ANGLE}°  天空强度 {SKY}")
 p(f"    视图转换 = {VT}（给高光留压缩余量，布光才显形）")
 
+# ---- 云层（MC 的天上是有云的，只有纯渐变天空会显得"世界是假的"）----
+#   MC 的云在 y≈128（地表 64 上方 64 格）。做成一块巨大的半透明噪声平面：
+#   1) 用 3D Noise 的 Fac 经 ColorRamp 切成软边团块，喂给 Principled 的 Alpha；
+#   2) 云面不投影（visible_shadow=False），否则会在主角身上压出一大片假阴影；
+#   3) 尺寸给 900 格，保证 105mm 长焦下地平线附近也有云，而不是只有头顶几团。
+p("\n[6.5] 云层（MC 风格噪声云）")
+cloud_ok = False
+try:
+    if os.environ.get('DSH_MC_CLOUDS', '1') != '0':
+        # ⚠️ 云面必须铺得极远：105mm 竖直视野约 11°，450 格远的地方才升到 43 格高，
+        #    所以 900 格/72 格高的云整块都在画面外（实测 A/B 两张图完全一样）。
+        #    改成 5000 格 + 地表 +62，远处云才会压在地平线附近。
+        bpy.ops.mesh.primitive_plane_add(size=5000.0,
+                                         location=(WX, WY, GROUND + 62.0))
+        cl = bpy.context.active_object
+        cl.name = "CloudLayer"
+        cm = bpy.data.materials.new("CloudMat")
+        cm.use_nodes = True
+        c_nt = cm.node_tree
+        c_bsdf = c_nt.nodes.get("Principled BSDF")
+        c_bsdf.inputs['Base Color'].default_value = (1.0, 0.985, 0.96, 1.0)
+        c_bsdf.inputs['Roughness'].default_value = 1.0
+        try_set(c_bsdf, 'Specular IOR Level', 0.0, 'cloud.specular')
+        c_noise = c_nt.nodes.new("ShaderNodeTexNoise")
+        c_noise.inputs['Scale'].default_value = 0.006
+        c_noise.inputs['Detail'].default_value = 8.0
+        c_noise.inputs['Roughness'].default_value = 0.62
+        c_ramp = c_nt.nodes.new("ShaderNodeValToRGB")
+        c_ramp.color_ramp.interpolation = 'EASE'
+        c_ramp.color_ramp.elements[0].position = 0.46
+        c_ramp.color_ramp.elements[0].color = (0.0, 0.0, 0.0, 1.0)
+        c_ramp.color_ramp.elements[1].position = 0.58
+        c_ramp.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
+        c_nt.links.new(c_noise.outputs['Fac'], c_ramp.inputs['Fac'])
+        c_nt.links.new(c_ramp.outputs['Color'], c_bsdf.inputs['Alpha'])
+        # EEVEE Next(4.2+/5.x) 用 surface_render_method，老版本用 blend_method
+        blended = False
+        for attr, val in (('surface_render_method', 'BLENDED'),
+                          ('blend_method', 'BLEND')):
+            try:
+                setattr(cm, attr, val)
+                blended = True
+                break
+            except Exception:
+                continue
+        if not blended:
+            p("    ⚠️ 这个版本设不了透明混合 → 云层跳过（不影响出图）")
+            bpy.data.objects.remove(cl, do_unlink=True)
+            raise RuntimeError('no blend mode')
+        cm.use_backface_culling = False
+        cl.data.materials.append(cm)
+        try_set(cl, 'visible_shadow', False, 'cloud.visible_shadow')
+        cloud_ok = True
+        p(f"    云层 y={GROUND + 62.0:.0f}（地表 +62）尺寸 5000 格 噪声 scale 0.006")
+    else:
+        p("    (DSH_MC_CLOUDS=0，无云)")
+except Exception as e:
+    p(f"    ⚠️ 云层构建失败({type(e).__name__}: {str(e)[:120]}) → 继续，无云")
+
 # ---- 相机基向量（灯和相机共用同一套，先算出来）----
 # 相机相对【世界位置】摆放。视线方位角用 MC 角度给（和地表扫描同一套坐标），
 # 免得我自己换算错：MC(x,z) → Blender(x,-z)，所以方向 (mx,mz) → (mx,-mz)。
