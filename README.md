@@ -50,6 +50,14 @@
 
 ![动画](assets/screenshot-3-anim.jpg)
 
+### 想换地图？在 DSH 里直接传（0.3.0 新增）
+
+不用再去文件夹里翻存档路径：**设置 → 背景地图**，把整合包的存档 `.zip` 拖进去，
+自动解压、自动找出里面的存档、自动读版本和坐标范围、自动生成缩略图。
+之后出封面直接说地图名字就行：
+
+> 用「方可梦世界」出一张封面
+
 ---
 
 ## 为什么不只是"跑个脚本"
@@ -195,6 +203,38 @@ python py/cli.py shoot "D:/saves/我的世界" --area -2100,-1600,-1400,-900 --o
 
 `--area` 是允许搜索的矩形范围（`x0,x1,z0,z1`）。不给机位它会自己找。
 
+### 第 5 步（可选）：把你的地图传进 DSH
+
+**DSH → 设置 → 背景地图** → 拖入存档 `.zip`（或点「选择文件」）。
+
+- 单个 zip 上限 **2 GB**，解压后上限 **6 GB** —— 原版整合包地图（几百 MB 到 1 GB）够用
+- zip 里套一层文件夹也能认（比如 `方可梦世界/新的世界/level.dat`）
+- 一次上传里如果有多个存档，会让你点选要哪一个
+- 传完会出现在列表里，带缩略图（能读到 `icon.png` 就用它）、MC 版本、坐标范围；
+  三个按钮：**设为默认** / **重命名** / **删除**（删除是软删，文件进回收目录，可找回）
+
+传完就不用记路径了，出图时用 `map` 参数点名：
+
+```jsonc
+// mc_shoot
+{ "map": "方可梦世界", "out": "E:/出图/方可梦封面" }        // 名字可以写部分前缀
+{ "map": "m_542656d4d9e4", "out": "..." }                  // 也可以写 map id
+```
+
+`map` 省掉两个必填参数：`save`（自动指向解压出来的存档目录）和 `area`
+（自动按存档包围盒推荐机位搜索范围）。想自己指定范围，照旧写 `area` 覆盖它。
+
+命令行等价写法（不经过 DSH 面板）：
+
+```bash
+# 导入一个 zip（--root 默认 %USERPROFILE%\.dsh\blender-mc\maps）
+python py/cli.py map import --zip D:/整合包/方可梦世界.zip --name 方可梦世界
+python py/cli.py map list
+python py/cli.py map resolve --name 方可梦        # 打印 savePath / area / 版本
+```
+
+数据都在 `%USERPROFILE%\.dsh\blender-mc\maps\` 下，一个地图一个目录，删插件不删地图。
+
 ---
 
 ## 使用教程
@@ -225,6 +265,10 @@ python py/cli.py anim <封面工程.blend> --out <目录> [--preview 1,60,120]
 
 # 只审图，不跑 Blender
 python py/cli.py check <图...> [--json]
+
+# 地图库：把存档 zip 收进来（DSH 面板做的是同一件事）
+python py/cli.py map import --zip <存档.zip> [--name 名字]
+python py/cli.py map list | resolve --name <名字> | rename | delete | default | doctor
 ```
 
 ### 在 DSH 里直接用
@@ -237,7 +281,10 @@ python py/cli.py check <图...> [--json]
 
 > 把出好的封面做成 10 秒动画
 
+> 用我上传的「方可梦世界」出三张不同机位的封面
+
 模型会自己判断该调哪个工具（`mc_doctor` / `mc_extract_models` / `mc_scan` / `mc_shoot` / `mc_anim` / `mc_check`）。
+上传过的地图可以直接用 `map` 参数点名（见[第 5 步](#第-5-步可选把你的地图传进-dsh)），不用报路径。
 
 ### 自带模型（可选）
 

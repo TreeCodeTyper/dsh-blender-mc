@@ -25,33 +25,66 @@ from vision_check import check_image          # noqa: E402
 # 默认参数 —— 每一项都是实测调出来的，注释写明为什么
 # ────────────────────────────────────────────────────────────
 DEFAULTS = {
-    'yaw': 25.0,           # 角色朝向。相机在 -Y 方向 → yaw≈25° 时是 3/4 侧脸面向镜头
-    'lens': 55.0,          # 焦距。T48 封面建议 80mm，但配合推近会太紧，55 折中
-    'view_transform': 'Standard',
+    'yaw': 25.0,           # 角色朝向。★ 现在由 build_cover 的「朝向搜索」按几何量测重定，
+                           #   这里只是搜索的初值（45° 3/4 侧脸才是最终目标）
+    'lens': 105.0,         # ★ 长焦才可能有景深：f=105/N1.4/17 格时无限远弥散 ≈16px@1280
+    'view_transform': 'AgX',
     # ⚠️ 坑 53/57：「标准」没有高光压缩。物理天空是辐射度量，
     #    强度一高就削顶成白、动态范围被天空占满、三点布光完全显不出来。
-    #    所以配套要求：天空强度 ≤0.05，灯光相应抬高（见 light_scale）。
-    'sky_strength': 0.03,
-    'light_scale': 1.0,    # 相对基准 320/140/420 的倍率
+    #    → 默认 AgX（有高光滚降）；Standard 下会自动钳到 0.05。
+    # ★ 0.20 实测把天空顶到 sky_hot_ratio 0.79（整片死白），降到 0.12 才有暖色层次
+    'sky_strength': 0.12,
+    'light_scale': 1.0,    # 三点布光的整体倍率（会经 DSH_KEY_SCALE 真正传给 Blender）
     'cam_az': 200.0,       # 视线方位角（MC 角度）
-    'dist': 11.2,          # 相机距离
+    'dist': 17.0,          # ★ 配合 105mm：17 格 ≈ 主体占画高 60%，背景弥散才够
     'sink': 0.06,          # ★ 脚陷入地面的深度。精确贴面时间隙 0.019，
                            #   MC 方块边缘锐利，这点缝会读成"悬浮"
     'res': '1280x720',
-    'samples': 256,
+    'samples': 192,        # 出图采样（优化方案 §6：预览 128 / 正式 192）
 }
 
 
 def run(cmd, log=None, timeout=None, cwd=None, env=None):
-    """跑外部命令。返回 (rc, stdout+stderr)"""
-    p = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8',
-                       errors='replace', timeout=timeout, cwd=cwd, env=env)
-    out = (p.stdout or '') + (p.stderr or '')
+    """跑外部命令。返回 (rc, stdout+stderr)
+
+    ⚠️ 坑 69：**不能用 capture_output / PIPE**。Windows 沙箱（DSH 的
+    workspace-write 受限模式）下 CreatePipe 会被直接拒：
+        PermissionError: [WinError 5] 拒绝访问
+    而且 Blender、导出器全都在这个沙箱里跑，一崩就是"导不出几何"。
+    改成把 stdout/stderr 重定向到【临时文件】再读回来 —— 不建管道，
+    内容一样拿得到；文件放 log 同目录（那里一定是可写的），没有 log 才用系统临时目录。
+    """
+    import tempfile
+    base = os.path.dirname(os.path.abspath(log)) if log else None
+    if not base or not os.path.isdir(base):
+        base = tempfile.gettempdir()
+    fd_o, path_o = tempfile.mkstemp(prefix='.cmd_', suffix='.out', dir=base)
+    fd_e, path_e = tempfile.mkstemp(prefix='.cmd_', suffix='.err', dir=base)
+    rc = None
+    try:
+        with os.fdopen(fd_o, 'wb') as fo, os.fdopen(fd_e, 'wb') as fe:
+            pr = subprocess.run(cmd, stdout=fo, stderr=fe,
+                                timeout=timeout, cwd=cwd, env=env)
+            rc = pr.returncode
+        chunks = []
+        for pth in (path_o, path_e):
+            try:
+                with open(pth, 'rb') as f:
+                    chunks.append(f.read().decode('utf-8', 'replace'))
+            except OSError:
+                pass
+        out = ''.join(chunks)
+    finally:
+        for pth in (path_o, path_e):
+            try:
+                os.remove(pth)
+            except OSError:
+                pass
     if log:
         with open(log, 'a', encoding='utf-8') as f:
             f.write('\n$ ' + ' '.join(str(c) for c in cmd) + '\n')
             f.write(out)
-    return p.returncode, out
+    return rc, out
 
 
 def resolve_assets(config=None):
@@ -211,7 +244,12 @@ def step_render(blender_exe, obj, out_dir, params, progress=print):
             env['DSH_RES_Y'] = str(h)
         except ValueError:
             progress(f'    ⚠️ 分辨率写法不认识: {params.get("res")}，用默认')
-    env['DSH_SAMPLES'] = str(int(params.get('samples', 256)))
+    env['DSH_SAMPLES'] = str(int(params.get('samples', 192)))
+    # ★ P0-4 补漏：light_scale 以前只改 params，从没传进 Blender ——
+    #   auto_adjust 里的 light_scale *= 1.8 是空转，渲染永远用基准灯。
+    env['DSH_KEY_SCALE'] = str(float(params.get('light_scale', 1.0)))
+    # ★ P1-1 雾开关：默认开；调用方环境里已显式设了 DSH_MC_FOG 就尊重它
+    env.setdefault('DSH_MC_FOG', '1')
     t0 = time.time()
     rc, out = run(args, log=os.path.join(out_dir, '_build.log'), env=env)
     if rc != 0:
@@ -231,8 +269,29 @@ def step_render(blender_exe, obj, out_dir, params, progress=print):
 
 
 def step_check(png, progress=print, annotate=None):
-    """④ 审图"""
-    r = check_image(png)
+    """④ 审图
+
+    ★ P0-0：Blender 侧会把角色身体包围盒投影成像素框写进 _subject_box.json，
+      这里优先用它。没有框时才退回按颜色自动找主体（大草原的绿/天的蓝
+      和角色配色容易撞，自动找法在远景里不可靠）。
+    """
+    box = None
+    sb = os.path.join(os.path.dirname(os.path.abspath(png)), '_subject_box.json')
+    if os.path.isfile(sb):
+        try:
+            with open(sb, encoding='utf-8') as f:
+                j = json.load(f)
+            b = j.get('subject_box')
+            if b and len(b) == 4:
+                box = tuple(int(v) for v in b)
+                progress(f'    审图框（Blender 投影）: {box}')
+            else:
+                progress(f"    ⚠️ Blender 没给出有效审图框: {j.get('notes')}")
+        except Exception as e:
+            progress(f'    ⚠️ 读 _subject_box.json 失败: {e}')
+    else:
+        progress('    (没有 _subject_box.json，退回按颜色自动找主体)')
+    r = check_image(png, subject_box=box)
     progress(f"    审图: {r['verdict']} {r['score']} 分")
     for i, s in enumerate(r.get('issues', []), 1):
         progress(f"      ⚠️  [{i}] {s}")
@@ -286,8 +345,8 @@ def auto_adjust(params, report):
         new['sink'] = min(0.35, params['sink'] + 0.08)
         fixes.append(f"下沉 {params['sink']} → {new['sink']}（加强接地）")
 
-    # 主体太小 → 拉近
-    if '主体太小' in issues:
+    # 主体太小 → 拉近（新判据的文案是"主体偏小"，两个都认）
+    if '主体太小' in issues or '主体偏小' in issues:
         new['dist'] = max(4.0, params['dist'] * 0.78)
         fixes.append(f"相机距离 {params['dist']} → {new['dist']:.1f}（拉近）")
     # 主体太满 → 拉远
@@ -379,7 +438,10 @@ def shoot(save, area, out_root, blender=None, params=None, center=None,
         history.append({'attempt': attempt, 'params': dict(p),
                         'png': png, 'blend': blend,
                         'verdict': rep['verdict'], 'score': rep['score'],
-                        'issues': rep['issues']})
+                        'issues': rep['issues'],
+                        # ★ P0-0：Blender 投影出来的主体框 + 全部原始指标数值
+                        'subject_box': rep.get('details', {}).get('subject_box'),
+                        'details': rep.get('details')})
         if rep['verdict'] == 'PASS' and rep['score'] >= target_score:
             progress(f'    ✅ 达标（{rep["score"]} ≥ {target_score}），停止迭代')
             break
@@ -405,6 +467,7 @@ def shoot(save, area, out_root, blender=None, params=None, center=None,
     result = {'center': center, 'params': final['params'], 'png': final['png'],
               'blend': final['blend'], 'verdict': final['verdict'],
               'score': final['score'], 'issues': final['issues'],
+              'subject_box': final.get('subject_box'),
               'res_requested': res_req, 'res_actual': res_actual,
               'finished_at': time.strftime('%Y-%m-%d %H:%M:%S'),
               'attempts': history}

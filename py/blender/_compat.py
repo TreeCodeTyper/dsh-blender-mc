@@ -106,11 +106,20 @@ def set_sky_type(sky_node, prefer='MULTIPLE_SCATTERING'):
 # ─────────────────────────────────────────────────────────────
 # 色彩管理 / 视图转换
 # ─────────────────────────────────────────────────────────────
-VT_CANDIDATES = ('Standard', 'Filmic', 'AgX', 'Filmic Log', 'Raw')
+# ⚠️ 坑 67：'Standard' 排第一是历史遗留 —— 它是 sRGB 直通，没有高光滚降，
+#   物理天空强度一高就削顶成白，整个动态范围被天空吃满，三点布光完全显不出来。
+#   AgX 才有高光压缩，天空才允许放到 0.09（详见 _scratch/render-opt/优化方案.md P0-1）。
+VT_CANDIDATES = ('AgX', 'Filmic', 'Standard', 'Filmic Log', 'Raw')
+# look 只在对应视图转换下存在（'AgX - Punchy' 需要 view_transform='AgX'），
+# 名字跨版本可能变，所以由调用方 try/except 降级到 'None'。
+VT_LOOKS = {'AgX': 'AgX - Punchy', 'Filmic': 'Filmic', 'Standard': 'None'}
 
 
-def set_view_transform(scene, prefer='Standard'):
-    """设置视图转换，跨版本（不同版本内置的转换名不同）"""
+def set_view_transform(scene, prefer='AgX'):
+    """设置视图转换，跨版本（不同版本内置的转换名不同）
+
+    回退顺序：prefer → AgX → Filmic → Standard → …
+    """
     order = (prefer,) + tuple(v for v in VT_CANDIDATES if v != prefer)
     for v in order:
         try:

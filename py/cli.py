@@ -159,6 +159,12 @@ def cmd_check(a):
     return 0
 
 
+def cmd_map(a):
+    """背景地图库：上传的存档 zip → 解压识别入库（逻辑全在 maplib.py）"""
+    import maplib
+    return maplib.main(a.rest)
+
+
 def main():
     ap = argparse.ArgumentParser(
         prog='dsh-blender-mc',
@@ -224,6 +230,11 @@ def main():
     c.add_argument('images', nargs='+')
     c.add_argument('--json', action='store_true')
     c.set_defaults(func=cmd_check)
+
+    mp = sub.add_parser('map', help='背景地图库（存档 zip 入库 / 列表 / 改名 / 删除）')
+    mp.add_argument('rest', nargs=argparse.REMAINDER,
+                    help='import|list|get|resolve|rename|delete|default|doctor + 各自参数')
+    mp.set_defaults(func=cmd_map)
 
     a = ap.parse_args()
     return a.func(a)

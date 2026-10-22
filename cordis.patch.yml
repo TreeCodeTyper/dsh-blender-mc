@@ -51,3 +51,9 @@
         models: ''
         # 单次渲染超时（建场景 + 渲染）
         renderTimeoutMs: 1800000
+        # ★ 背景地图库（0.3.0 起）：DSH 设置页「背景地图」上传的存档 zip 解压到这里。
+        #   留空 = <DSH_HOME 或 ~/.dsh>/blender-mc/maps
+        #   地图目录不进插件目录，重装插件不会丢。
+        mapsDir: ''
+        # 单个 zip 上传上限（MiB）。默认 2048，上限受解压后 6 GiB 另行限制。
+        maxUploadMb: 2048

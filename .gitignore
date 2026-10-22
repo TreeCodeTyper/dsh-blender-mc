@@ -34,3 +34,6 @@ scripts/.tmp_extract_test/
 
 # npm pack 产物
 *.tgz
+
+# npm pack 用的沙箱内缓存
+.npmcache/

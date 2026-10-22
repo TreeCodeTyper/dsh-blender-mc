@@ -21,6 +21,7 @@
             ② 抓握点取摆完姿势后的 Hand.R 骨中点（不能用网格 bbox）；
             ③ 剑沿刃轴下沉 DSH_SWORD_SINK，让手掌包住一段柄 —— 握持不是"托着"。
 """
+import json
 import math
 import os
 import sys
@@ -48,29 +49,52 @@ RES_Y = int(os.environ.get("DSH_RES_Y", "720"))
 SAMPLES = int(os.environ.get("DSH_SAMPLES", "256"))   # EEVEE 采样数
 
 # ★ 光照/氛围（工作区副本新增）——做"黄昏逆光"这类氛围片用
-SUN_ELEV = float(os.environ.get("DSH_SUN_ELEV", "45"))      # 太阳仰角（度）8=黄昏贴地
-SUN_ROT = float(os.environ.get("DSH_SUN_ROT", "215"))       # 太阳方位（度）
-SUN_INT = float(os.environ.get("DSH_SUN_INT", "3.5"))       # 太阳强度
+#   数值口径见 _scratch/render-opt/优化方案.md §6「参数总表」（AgX+Punchy 下标定）
+SUN_ELEV = float(os.environ.get("DSH_SUN_ELEV", "8"))       # 太阳仰角（度）8=黄昏贴地
+# ⚠️ 太阳方位【固定世界 340°】而不是跟 CAM_AZ 绑定（优化方案 P0-2）：
+#   跟机位绑会让"同一个存档换个机位就换了个时段"；解耦后绕场才会自然出现
+#   顺光/侧光/逆光的叙事变化。仍可用 DSH_SUN_ROT 覆盖。
+SUN_ROT = float(os.environ.get("DSH_SUN_ROT", "340"))       # 太阳方位（度）
+SUN_INT = float(os.environ.get("DSH_SUN_INT", "6.0"))       # 太阳灯强度
+SUN_COLOR = (1.0, 0.70, 0.42)                               # 黄昏暖色
+SUN_ANGLE = float(os.environ.get("DSH_SUN_ANGLE", "1.6"))   # 太阳盘角（度）
 KEY_SCALE = float(os.environ.get("DSH_KEY_SCALE", "1.0"))   # 三点布光整体倍率
-CAM_H = float(os.environ.get("DSH_CAM_H", "2.45"))          # 相机离地（格）
-AIM_H = float(os.environ.get("DSH_AIM_H", "1.05"))          # 看向高度（格）
-AIM_SIDE = float(os.environ.get("DSH_AIM_SIDE", "0.9"))     # 看向点横移（留白量）
-EXPOSURE = float(os.environ.get("DSH_EXPOSURE", "0.0"))     # 曝光补偿
+# ★ Rim 单独倍率（优化方案 P0-4 第 6 条）：逆光封面里轮廓光常要拉到 Key 的 3 倍。
+RIM_SCALE = float(os.environ.get("DSH_RIM_SCALE", str(KEY_SCALE)))
+CAM_H = float(os.environ.get("DSH_CAM_H", "1.30"))          # 相机离地（格）胸口高度
+AIM_H = float(os.environ.get("DSH_AIM_H", "1.00"))          # 看向高度（格）
+AIM_SIDE = float(os.environ.get("DSH_AIM_SIDE", "0.58"))    # 看向点横移（留白量）
+EXPOSURE = float(os.environ.get("DSH_EXPOSURE", "0.05"))    # 曝光补偿（AgX 下 +0.05）
+# ★ look：AgX 下用 'AgX - Punchy' 把被压掉的饱和度找回来；失败降级 'None'
+LOOK = os.environ.get("DSH_LOOK", "AgX - Punchy").strip() or "None"
 LENS_OVR = float(os.environ.get("DSH_LENS", "0"))           # 焦距覆盖（0=用默认）
+# ★ 雾：默认开；任何一步异常整体回退成"无雾"，绝不让渲染失败
+FOG_ON = os.environ.get("DSH_MC_FOG", "1").lower() not in ("0", "off", "false", "no")
 
 argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
 OBJ = argv[0]
 OUT = argv[1]
 YAW = float(argv[2]) if len(argv) > 2 else 25.0       # 角色朝向（度）
-LENS = float(argv[3]) if len(argv) > 3 else 52.0
-VT = argv[4] if len(argv) > 4 else 'Standard'         # 视图转换
-SKY = float(argv[5]) if len(argv) > 5 else 0.03        # 天空强度
+LENS = float(argv[3]) if len(argv) > 3 else 105.0
+VT = argv[4] if len(argv) > 4 else 'AgX'              # 视图转换
+SKY = float(argv[5]) if len(argv) > 5 else 0.12        # 天空强度（0.20 会削顶成白板）
 CAM_AZ = float(argv[6]) if len(argv) > 6 else 210.0    # 视线方位角（MC 角度）
-DIST = float(argv[7]) if len(argv) > 7 else 12.2        # 相机距离
+DIST = float(argv[7]) if len(argv) > 7 else 17.0        # 相机距离（105mm 配 17 格 ≈ 画高 60%）
+# 自动改方位后角色转了多少度 —— BYO 自带模型也要跟着转，否则和角色不一体。
+_YAW_DELTA = 0.0
 # ★ 落地时让脚【略微陷入】地面，而不是精确贴面。
 #   实测：精确贴面时间隙 0.019（数值上正确），但 MC 方块边缘锐利，
 #   这点缝在画面里会读成"悬浮"。往下沉 0.06 让鞋底真正埋进草方块顶面。
 SINK = float(argv[8]) if len(argv) > 8 else 0.06
+# ★ 景深光圈：方案写 f/2.2，但那是"看起来浅"的经验值。
+#   算过账：50mm、主体 8.2m、f/2.2 时，无限远的弥散圆只有
+#       f²/(N·s) = 2500/(2.2×8200) ≈ 0.14mm ≈ 36mm 画幅的 0.39%
+#   → 1280 宽只有 ~5px，背景草地（30~150m）几乎不糊，审图永远 0 分。
+#   要真的拉开层次得开到 f/1.2~1.4（≈8px），这里默认 1.4，可用 DSH_FSTOP 覆盖。
+FSTOP = float(os.environ.get("DSH_FSTOP", "1.4"))
+# ▲ 视线方位自动选择：scan 只保证「周围是平地」，不管朝哪看。
+#   朝山崖看 = 满屏土墙、一丝天空都没有（实测旧图天空占比 0%）。
+AUTO_AZ = os.environ.get("DSH_MC_AUTO_AZ", "1") not in ("0", "false", "False", "no")
 os.makedirs(OUT, exist_ok=True)
 LOG = []
 
@@ -83,6 +107,21 @@ def p(s=''):
 def finish(code=0):
     open(os.path.join(OUT, '_封面日志.txt'), 'w', encoding='utf-8').write('\n'.join(LOG))
     sys.exit(code)
+
+
+def try_set(obj, attr, val, tag=''):
+    """设置一个属性，失败时【逐项记进日志】，不再用 `except: pass` 静默吞。
+
+    ⚠️ 坑 68：原来天空参数是 `for attr,val in (...): try: setattr(...) except: pass`，
+    Blender 5.2 把 `dust_density` 改名成 `aerosol_density` 后，那一行被吞掉，
+    等于「写了参数其实没设」，查了半天才发现。凡是版本敏感的属性都走这里。
+    """
+    try:
+        setattr(obj, attr, val)
+        return True
+    except Exception as e:
+        p(f"    ⚠️ 设置 {tag or attr} = {val!r} 失败: {type(e).__name__}: {str(e)[:120]}")
+        return False
 
 
 def bbox(objs):
@@ -312,6 +351,100 @@ p(f"    世界 xy 中心 ({WX:.1f}, {WY:.1f})")
 p(f"    射线向下探测地面: {'命中 ' + str(hobj.name) if hit else '没命中'} "
   f"→ 地面 z={GROUND:.2f}")
 
+# ============================================================
+# ---- 视线方位自动选择：先看"朝哪看有天空"（sky-first）----
+#   scan 的 openness 只保证「周围 15 格是平地」，完全不管视线，
+#   于是可能架好相机才发现正对一堵 26 格高的土崖 —— 上半幅没有天空
+#   （实测：旧图天空占比 0%，审图直接报"没有渐变/没有高光斑"）。
+#   做法：拿刚导入的世界网格顶点建 2 格精度高度图，对每个候选方位
+#   沿视线采样，算「前方地形相对镜头仰角的最大值」；再给"太阳在正前方"
+#   加分（低角度太阳+暖霞是黄昏封面的关键，也让审图的天空项有东西可测）。
+#   任何一步失败 → 保持用户给的方位，绝不让选角度把渲染搞挂。
+# ============================================================
+def _eye_azimuth_pick():
+    try:
+        import numpy as _np
+        # wmesh 是世界网格【列表】（这时角色还没加进来），取顶点最多的那块当地形
+        _ob = max(wmesh, key=lambda o: len(o.data.vertices))
+        _me = _ob.data
+        _n = len(_me.vertices)
+        _co = _np.empty(_n * 3, dtype=_np.float32)
+        _me.vertices.foreach_get('co', _co)
+        _co = _co.reshape(_n, 3).astype(_np.float64)
+        _M = _np.array(_ob.matrix_world)
+        _pts = _co @ _M[:3, :3].T + _M[:3, 3]
+        _cell = 2.0
+        _x0, _y0 = float(_pts[:, 0].min()), float(_pts[:, 1].min())
+        _W = int((float(_pts[:, 0].max()) - _x0) // _cell) + 1
+        _H = int((float(_pts[:, 1].max()) - _y0) // _cell) + 1
+        _hg = _np.full((_H, _W), -1e9, dtype=_np.float64)
+        _ii = ((_pts[:, 0] - _x0) // _cell).astype(_np.int64)
+        _jj = ((_pts[:, 1] - _y0) // _cell).astype(_np.int64)
+        _np.maximum.at(_hg, (_jj, _ii), _pts[:, 2])
+        _eye_z = GROUND + CAM_H
+        _r = _np.arange(4.0, 172.0, 2.0)
+
+        def _score(az):
+            _phi = math.radians(az)
+            _fx, _fy = math.cos(_phi), -math.sin(_phi)
+            # 从【相机位置】起算视线（DIST 变了，前景遮挡也跟着变）
+            _px = (WX - _fx * DIST) + _fx * _r
+            _py = (WY - _fy * DIST) + _fy * _r
+            _ci = ((_px - _x0) // _cell).astype(_np.int64)
+            _cj = ((_py - _y0) // _cell).astype(_np.int64)
+            _ok = (_ci >= 0) & (_ci < _W) & (_cj >= 0) & (_cj < _H)
+            if not _ok.any():
+                return -1e9, 90.0
+            _rr = _r[_ok]
+            _hh = _hg[_cj[_ok], _ci[_ok]]
+            _m = _hh > -1e8
+            _rr, _hh = _rr[_m], _hh[_m]
+            if _rr.size == 0:
+                return -1e9, 90.0
+            _elev = _np.degrees(_np.arctan2(_hh - _eye_z, _rr))
+            _hmax = float(_elev.max())
+            # ★ 天空带里的地形占比：仰角 > 1.5° 且 120 格内的视线比例。
+            #   远处树冠/浮岛会被读成"浮空方块"糊在天空里（lead 核对 verify2/3 时提的）。
+            _sky_hit = float(((_elev > 1.5) & (_rr < 120.0)).mean()) if _rr.size else 1.0
+            _daz = abs((az - SUN_ROT + 180.0) % 360.0 - 180.0)
+            sc = 100.0 - 7.0 * max(0.0, _hmax)
+            sc -= 55.0 * max(0.0, _sky_hit - 0.06) / 0.94
+            sc += 34.0 * max(0.0, 1.0 - _daz / 30.0)
+            if _hmax > 10.0:
+                sc -= 60.0
+            return sc, (_hmax, _sky_hit)
+
+        return [(a, _score(a)[0], _score(a)[1]) for a in range(0, 360, 5)]
+    except Exception as e:
+        p(f"    ⚠️ 视线评估失败({type(e).__name__}: {str(e)[:120]}) → 保持原方位")
+        return None
+
+
+_az_scored = _eye_azimuth_pick() if AUTO_AZ else None
+if _az_scored:
+    _best_az, _best_sc, _best_elev = max(_az_scored, key=lambda t: t[1])
+    _cur = min(_az_scored, key=lambda t: abs(t[0] - CAM_AZ))
+    p(f"    视线评估: 当前方位 {CAM_AZ:.0f}° → 得分 {_cur[1]:.0f}"
+      f"（地形仰角 {_cur[2][0]:.1f}°，天空带地形 {_cur[2][1]*100:.0f}%）")
+    p(f"    最佳方位 {_best_az:.0f}° → 得分 {_best_sc:.0f}"
+      f"（地形仰角 {_best_elev[0]:.1f}°，天空带地形 {_best_elev[1]*100:.0f}%，"
+      f"太阳在 {SUN_ROT:.0f}°）")
+    _top = sorted(_az_scored, key=lambda t: -t[1])[:5]
+    p("    候选: " + "  ".join(
+        f"{a:.0f}°→{sc:.0f}(仰角{e[0]:.1f}/天空{e[1]*100:.0f}%)"
+        for a, sc, e in _top))
+    if _best_sc > _cur[1] + 4 and abs(_best_az - CAM_AZ) >= 5:
+        _old_az = CAM_AZ
+        _d_az = _best_az - _old_az
+        CAM_AZ = float(_best_az)
+        # ⚠️ 这里【不再】顺手改 YAW：方位换了多少度就反向补多少度，这条补偿只有
+        #   在「初始 yaw 本来就是正面」时才成立。verify6/verify7 实测证明它不是
+        #   不变量（az 200/yaw 25 是正面，az 345/yaw 173 却是背面，两者相对角一样）。
+        #   真正可靠的做法是等角色进场后用几何量测出朝向，见 [4.9] 的朝向搜索。
+        p(f"    ★ 自动改视线方位 {_old_az:.0f}° → {CAM_AZ:.0f}°"
+          f"（角色朝向稍后按几何量测重新定）")
+
+
 # ---- 角色 ----
 p("\n[4] 追加 BPS 角色 V4.0.9（集合方式）")
 before = set(bpy.data.objects.keys())
@@ -488,20 +621,62 @@ if mn is not None:
 else:
     p("    !! 求值包围盒取不到，跳过落地")
 
-if arm:
-    arm.rotation_euler = (0, 0, math.radians(YAW))
+# ★ [4.9] 朝向搜索：用几何量测把 yaw 定下来，别再靠「相对角」公式推算。
+#
+#   为什么不能算：verify6（az 0 / yaw 25）是侧脸，verify7（az 345 / yaw 173）是
+#   背面，两组的 (cam_az − yaw) 都在 170° 附近 —— 说明「相对角恒定 ⇒ 视角恒定」
+#   这个假设根本不成立（角色静止朝向、相机方位、太阳方位三套换算不统一）。
+#   而这里这个几何量测是准的：verify7 它报「面部→相机夹角 112° → 背面」，
+#   和成图完全一致。所以直接拿它当目标函数，搜出一个正对镜头的 yaw。
+#
+#   判据：后脑方向 (head − face) 与「主体 → 相机」方向的夹角 ang，
+#   ang 小 = 正对镜头。目标取 25°~40°（正中会显得证件照，留点 3/4 侧脸）。
+def _facing_probe(yaw_deg):
+    """把角色转到 yaw_deg，量出「面部→相机夹角」。返回 (ang, tag) 或 None。"""
+    arm.rotation_euler = (0, 0, math.radians(yaw_deg))
     bpy.context.view_layer.update()
-    # 报告朝向：用【求值后】的面部/头部中心比较 y（和落地同理）
-    face = next((o for o in char if 'mesh face' in o.name.lower()), None)
-    head = next((o for o in char if o.name.lower().endswith('mesh head')), None)
-    if face and head:
-        fb = eval_bbox([face])
-        hb = eval_bbox([head])
-        if fb[0] and hb[0]:
-            fy = (fb[0].y + fb[1].y) / 2
-            hy = (hb[0].y + hb[1].y) / 2
-            p(f"    朝向 yaw={YAW}°  面部中心 y={fy:.2f} 头部中心 y={hy:.2f} "
-              f"→ 面朝 {'-Y（相机在 -Y，即【面向镜头】）' if fy < hy else '+Y（背对相机）'}")
+    fb = eval_bbox([_face_obj])
+    hb = eval_bbox([_head_obj])
+    if not (fb[0] and hb[0]):
+        return None
+    fx = (fb[0].x + fb[1].x) / 2.0
+    fy = (fb[0].y + fb[1].y) / 2.0
+    hx = (hb[0].x + hb[1].x) / 2.0
+    hy = (hb[0].y + hb[1].y) / 2.0
+    vx, vy = hx - fx, hy - fy               # 面部 → 后脑
+    cdx = -math.cos(math.radians(CAM_AZ))   # 主体 → 相机
+    cdy = math.sin(math.radians(CAM_AZ))
+    vl = math.hypot(vx, vy) or 1e-6
+    dot = (vx * cdx + vy * cdy) / vl
+    ang = math.degrees(math.acos(max(-1.0, min(1.0, -dot))))
+    tag = ("正面" if ang < 60 else "侧脸" if ang < 100 else "★背面★")
+    return ang, tag
+
+
+if arm:
+    _yaw_orig = YAW
+    _face_obj = next((o for o in char if 'mesh face' in o.name.lower()), None)
+    _head_obj = next((o for o in char if o.name.lower().endswith('mesh head')), None)
+    if _face_obj and _head_obj:
+        _probe = _facing_probe(YAW)
+        if _probe is None:
+            p("    !! 面部/头部包围盒取不到，跳过朝向搜索")
+        else:
+            p(f"    朝向搜索前：yaw={YAW:.0f}° 夹角 {_probe[0]:.0f}° → {_probe[1]}")
+            # 全周扫描（每 3°）直接挑「夹角最接近 45°」的那个 —— 45° 是标准的
+            # 3/4 侧脸，脸看得见、举起的右手也不会挡在脸前面（正中 15° 会挡）。
+            _cands = [(a, _facing_probe(a)) for a in range(0, 360, 3)]
+            _cands = [(a, r) for a, r in _cands if r is not None]
+            if _cands:
+                YAW = min(_cands, key=lambda t: abs(t[1][0] - 45.0))[0]
+                _after = _facing_probe(YAW)
+                p(f"    ★ 朝向搜索：yaw {YAW:.0f}°  夹角 {_after[0]:.0f}° → "
+                  f"{_after[1]}（相机方位 {CAM_AZ:.0f}°，太阳 {SUN_ROT:.0f}°，"
+                  f"扫了 {len(_cands)} 个候选）")
+    else:
+        p("    !! 找不到 face/head 网格，朝向保持 yaw=%.0f°" % YAW)
+    _YAW_DELTA = YAW - _yaw_orig   # 自带模型跟着角色一起对镜头
+    arm.rotation_euler = (0, 0, math.radians(YAW))
 bpy.context.view_layer.update()
 
 # ============================================================
@@ -599,8 +774,15 @@ if arm and any(b.name == 'Hand.R' for b in arm.data.bones):
     #   ② 偏 +X 不够时，剑尖仍停在头部范围内。
     # 现在手臂已经抬起来（[4.8]），手在肩高、离头 0.4 格左右，
     # 只要保持"竖直 + 一点点外倾"就不会糊脸。
-    blade_w = mathutils.Vector((0.42, -0.22, 1.0))
-    normal_w = mathutils.Vector((0.12, -0.99, 0.0))
+    #
+    # ★ 坑 73/74（verify8/9/10 连踩三张）：这两个方向必须在【角色局部系】里给，
+    #   不能当成世界方向。角色转向靠 arm.rotation_euler=YAW，朝向搜索会把 yaw
+    #   改到 300° 这种大角度；剑要是写死世界方向，就会横过来从脸前面劈过去。
+    #   局部系约定（BPS V4 静止朝 −Y）：+X = 角色右手侧，+Z = 上，−Y = 正面。
+    #   剑=「竖直偏右手侧 40°、刃面朝镜头」→ 剑尖一定落在头的外侧，不糊脸。
+    _yaw_rot = mathutils.Matrix.Rotation(math.radians(YAW), 3, 'Z')
+    blade_w = _yaw_rot @ mathutils.Vector((0.92, -0.10, 1.0))
+    normal_w = _yaw_rot @ mathutils.Vector((0.00, -1.0, 0.0))
     R = basis_from(blade_w, normal_w).to_4x4()
 
     # ★ 坑 55 + 坑 71 的修正：
@@ -722,7 +904,7 @@ def import_model(idx, cfg):
 
     # ★ 顺序很重要：先设【朝向】和【缩放】，最后才按包围盒算落地位移。
     #   反过来做的话，转完朝向包围盒会变，落地就算错了。
-    mo.rotation_euler = (0, 0, math.radians(cfg["yaw"]))
+    mo.rotation_euler = (0, 0, math.radians(cfg["yaw"] + _YAW_DELTA))
     mo.scale = (cfg["scale"], cfg["scale"], cfg["scale"])
     bpy.context.view_layer.update()
     bb = [mo.matrix_world @ mathutils.Vector(c) for c in mo.bound_box]
@@ -780,14 +962,21 @@ for k in ('MULTIPLE_SCATTERING', 'NISHITA', 'HOSEK_WILKIE', 'PREETHAM'):
         sky = nt.nodes.new("ShaderNodeTexSky")
         sky.sky_type = k
         sky.sun_elevation = math.radians(SUN_ELEV)
-        sky.sun_rotation = math.radians(SUN_ROT) - math.pi / 2
+        # ★ 标定过的换算（别改成 ±90，会差 95°）：实测 sun_rotation=R 时
+        #   日轮出现在"相机 MC 方位角 R+270"的方向（R=0→270, R=90→0，两点验证）。
+        #   要让日轮落在 MC 方位 SUN_ROT，就得 sun_rotation = SUN_ROT - 270。
+        #   ⚠️ 太阳【灯】的朝向公式完全不同（见下面 rotation_euler），
+        #   两边必须各自按实测换算，否则日轮和投影方向会差出 100° 以上。
+        sky.sun_rotation = math.radians(SUN_ROT - 270.0)
         sky.sun_disc = True
-        for attr, val in (("altitude", 120.0), ("air_density", 1.0),
-                          ("dust_density", 0.5), ("ozone_density", 1.0)):
-            try:
-                setattr(sky, attr, val)
-            except Exception:
-                pass
+        # ★ 5.2 的属性名（优化方案 P0-3）：`dust_density` 早就不存在了，
+        #   正确名字是 `aerosol_density`。逐项 try + 逐项记日志，
+        #   避免下次改名又被静默吞掉。
+        for attr, val in (("altitude", 120.0), ("air_density", 1.25),
+                          ("aerosol_density", 1.7), ("ozone_density", 1.0),
+                          ("ground_albedo", 0.30), ("sun_intensity", 5.0),
+                          ("sun_size", math.radians(1.8))):
+            try_set(sky, attr, val, f"sky.{attr}")
         nt.links.new(sky.outputs['Color'], bg.inputs['Color'])
         kind = k
         break
@@ -798,50 +987,85 @@ for k in ('MULTIPLE_SCATTERING', 'NISHITA', 'HOSEK_WILKIE', 'PREETHAM'):
             pass
 if kind is None:
     bg.inputs['Color'].default_value = (0.35, 0.58, 0.95, 1)
+# ⚠️ 坑 53/57：视图转换与天空强度必须配套 ——
+#   「标准」没有高光压缩，物理天空（辐射度量）哪怕强度 0.12 也会削顶成白，
+#   整个动态范围被天空占满，三点布光完全显不出来（= "背景死白 + 没有光源"）。
+#   → 最终渲染用 AgX（默认），天空强度可以放到 0.09；
+#     但只要 VT 是 Standard 就必须钳到 ≤0.05，写成硬约束。
+if str(VT).strip().lower() == 'standard' and SKY > 0.05:
+    p(f"    ⚠️ 视图转换 = Standard → 天空强度 {SKY} 钳到 0.05（否则削顶死白）")
+    SKY = 0.05
 bg.inputs['Strength'].default_value = SKY
 nt.links.new(bg.outputs['Background'], out.inputs['Surface'])
 sd = bpy.data.lights.new("SunKey", type='SUN')
 sd.energy = SUN_INT
-sd.angle = math.radians(2.5)
+sd.angle = math.radians(SUN_ANGLE)
+sd.color = SUN_COLOR
 so = bpy.data.objects.new("SunKey", sd)
 bpy.context.scene.collection.objects.link(so)
-so.rotation_euler = (math.radians(90 - SUN_ELEV), 0, math.radians(SUN_ROT + 90))
-p(f"    {kind or '平涂蓝'}  太阳仰角 {SUN_ELEV:.0f}° 方位 {SUN_ROT:.0f}°  "
-  f"强度 {SUN_INT}  天空强度 {SKY}")
-# ⚠️ 坑 53/57：视图转换与天空强度必须配套 ——
-#   「标准」没有高光压缩，物理天空（辐射度量）哪怕强度 0.12 也会削顶成白，
-#   整个动态范围被天空占满，三点布光完全显不出来（= "背景死白 + 没有光源"）。
-#   T30 说的"切标准"是【调色时】为了看见颜色变化，不是最终渲染该用的。
-#   → 最终渲染用 Filmic / AgX，天空强度可以放到 0.4~0.8。
+# ★ 太阳灯朝向：让光线从 MC 方位 SUN_ROT 打过来。
+#   推导：rotation_euler=(90-elev, 0, rz) 时，光的行进方向是
+#   (-sin rx·sin rz, sin rx·cos rz, -cos rx)；要它等于 -(cos φ, -sin φ)，
+#   解出 rz = 90 - φ。原来写成 φ+90，实测日轮在 340° 方向、
+#   灯却在 20° 方向（差 140°），人物是"侧逆光却投正影"，必须一起改。
+so.rotation_euler = (math.radians(90 - SUN_ELEV), 0, math.radians(90 - SUN_ROT))
+p(f"    {kind or '平涂蓝'}  太阳仰角 {SUN_ELEV:.1f}° 方位 {SUN_ROT:.0f}°  "
+  f"灯强度 {SUN_INT} 色 {SUN_COLOR} 盘角 {SUN_ANGLE}°  天空强度 {SKY}")
 p(f"    视图转换 = {VT}（给高光留压缩余量，布光才显形）")
 
-# ---- T48 三点布光 ----
-p("\n[7] T48 三点布光")
+# ---- 相机基向量（灯和相机共用同一套，先算出来）----
+# 相机相对【世界位置】摆放。视线方位角用 MC 角度给（和地表扫描同一套坐标），
+# 免得我自己换算错：MC(x,z) → Blender(x,-z)，所以方向 (mx,mz) → (mx,-mz)。
+_az = math.radians(CAM_AZ)
+_mc = (math.cos(_az), math.sin(_az))
+fw = mathutils.Vector((_mc[0], -_mc[1], 0.0)).normalized()   # 视线水平方向
+_right = mathutils.Vector((fw.y, -fw.x, 0.0)).normalized()   # 视线右方
+up = mathutils.Vector((0.0, 0.0, 1.0))
+
+# 角色中心 C（灯都绕它摆）。身高用【求值后】包围盒，含举臂。
+_cmn, _cmx = eval_bbox(body)
+CH_H = float(_cmx.z - _cmn.z) if (_cmn is not None and _cmx is not None) else 1.8
+C = mathutils.Vector((WX, WY, GROUND + CH_H * 0.52))
+p(f"    角色中心 C = {tuple(round(v, 2) for v in C)}（身高 {CH_H:.2f}）")
+
+# ---- T48 三点布光（★ 相机相对，优化方案 P0-4）----
+#   原来的三盏灯是【世界轴绝对坐标】+ 写死欧拉角：CAM_AZ 一变，Key 变侧逆光、
+#   Rim 变正面光，同一套灯在不同机位下含义完全不同（az290 实测到的）。
+#   现在全部用 fw/_right/up 的相机基向量摆位，朝向直接朝角色中心。
+p("\n[7] T48 三点布光（相机相对）")
 for o in list(bpy.data.objects):
     if o.type == 'LIGHT' and o.name.split('.')[0] in ('Key', 'Fill', 'Rim'):
         bpy.data.objects.remove(o, do_unlink=True)
 
 
-def area(name, loc, rot, energy, size):
+def area(name, loc, energy, size, color, vol, target, scale=1.0):
     ld = bpy.data.lights.new(name, type='AREA')
-    ld.energy = energy
+    ld.energy = energy * scale
     ld.shape = 'SQUARE'
     ld.size = size
+    ld.color = color
+    for attr, val in (('use_shadow_jitter', True), ('shadow_jitter_overblur', 12.0),
+                      ('shadow_filter_radius', 2.0), ('volume_factor', vol)):
+        try_set(ld, attr, val, f'{name}.{attr}')
     ob = bpy.data.objects.new(name, ld)
     bpy.context.scene.collection.objects.link(ob)
     ob.location = loc
-    ob.rotation_euler = rot
+    ob.rotation_euler = (target - loc).to_track_quat('-Z', 'Y').to_euler()
     return ob
 
 
-area("Key", (WX + 3.5, WY - 3.8, GROUND + 5.0),
-     (math.radians(50), 0, math.radians(42)), 320.0 * KEY_SCALE, 3.0)
-area("Fill", (WX - 4.2, WY - 2.6, GROUND + 2.8),
-     (math.radians(74), 0, math.radians(-58)), 140.0 * KEY_SCALE, 5.5)
-area("Rim", (WX - 0.5, WY + 3.8, GROUND + 3.6),
-     (math.radians(80), 0, math.radians(188)), 420.0 * KEY_SCALE, 3.0)
-p(f"    Key {320*KEY_SCALE:.0f} / Fill {140*KEY_SCALE:.0f} / "
-  f"Rim {420*KEY_SCALE:.0f}（倍率 {KEY_SCALE}，黄昏逆光时调小）")
+_KEY = C - fw * 2.3 + _right * 1.9 + up * 2.3
+_FILL = C - fw * 2.6 - _right * 2.3 + up * 1.5
+# ★ 逆光封面靠轮廓光把人物从天空里"抠"出来：900W、往镜头侧收一点、
+#   再抬高 0.2，让光更贴肩线/剑刃（实测 700W/2.0 时 rim_bright_frac 只有 0.08~0.20）。
+_RIM = C + fw * 1.75 - _right * 1.15 + up * 1.8
+area("Key", _KEY, 210.0, 2.4, (1.00, 0.87, 0.72), 0.10, C, KEY_SCALE)
+area("Fill", _FILL, 130.0, 5.0, (0.58, 0.73, 1.00), 0.00, C, KEY_SCALE)
+area("Rim", _RIM, 900.0, 1.0, (1.00, 0.80, 0.55), 0.00, C, RIM_SCALE)
+p(f"    Key {210*KEY_SCALE:.0f}W s2.4 / Fill {130*KEY_SCALE:.0f}W s5.0 / "
+  f"Rim {900*RIM_SCALE:.0f}W s1.0（KEY_SCALE {KEY_SCALE} / RIM_SCALE {RIM_SCALE}）")
+p(f"    Key 位置 {tuple(round(v, 2) for v in _KEY)}  "
+  f"Rim 位置 {tuple(round(v, 2) for v in _RIM)}")
 
 # ---- 相机 ----
 p("\n[8] 相机")
@@ -850,21 +1074,51 @@ cam_d.lens = (LENS_OVR if LENS_OVR > 0 else LENS)
 cam = bpy.data.objects.new("Cam", cam_d)
 bpy.context.scene.collection.objects.link(cam)
 bpy.context.scene.camera = cam
-# 相机相对【世界位置】摆放。视线方位角用 MC 角度给（和地表扫描同一套坐标），
-# 免得我自己换算错：MC(x,z) → Blender(x,-z)，所以方向 (mx,mz) → (mx,-mz)。
-_az = math.radians(CAM_AZ)
-_mc = (math.cos(_az), math.sin(_az))
-fw = mathutils.Vector((_mc[0], -_mc[1], 0.0)).normalized()   # 视线水平方向
-_right = mathutils.Vector((fw.y, -fw.x, 0.0)).normalized()   # 视线右方
+# 相机相对【世界位置】摆放。fw/_right 已在三点布光前算好（同一套坐标）。
 cam.location = (mathutils.Vector((WX, WY, GROUND))
                 - fw * DIST
-                + mathutils.Vector((0.0, 0.0, CAM_H)))
+                + up * CAM_H)
 # 看向点往视线右方偏 → 角色落在画面左侧，右侧留白给文字
 look = (mathutils.Vector((WX, WY, GROUND + AIM_H)) + _right * AIM_SIDE)
 cam.rotation_euler = (look - cam.location).to_track_quat('-Z', 'Y').to_euler()
 p(f"    {LENS:.0f}mm  视线方位 {CAM_AZ:.0f}°(MC)  距离 {DIST}")
+p(f"    机位高 {CAM_H}  看向高 {AIM_H}  侧移 {AIM_SIDE}"
+  f"（角色在左、右侧留白给文字）")
 p(f"    位置 {tuple(round(v,2) for v in cam.location)}  "
   f"看向 {tuple(round(v,2) for v in look)}")
+
+# ★ 景深（优化方案 P1-2）：f/2.2，对焦【头部网格】。
+#   实测坑：BPS 的网格对象原点不一定在头上（可能还挂在骨架原点），
+#   直接 focus_object 会让焦点落在空气里。所以先试 focus_object，
+#   若对象原点离头部包围盒中心太远，就退回 focus_distance（几何算出来）。
+_head = next((o for o in body
+              if 'head' in o.name.lower() and 'eyebrow' not in o.name.lower()), None)
+_hb = eval_bbox([_head]) if _head else (None, None)
+if _hb[0] is not None:
+    _head_c = (_hb[0] + _hb[1]) / 2.0
+else:
+    _head_c = C + up * (CH_H * 0.28)
+cam_d.dof.use_dof = True
+cam_d.dof.aperture_fstop = FSTOP
+try:
+    cam_d.dof.aperture_blades = 6
+except Exception:
+    pass
+_dof_src = 'focus_distance'
+if _head is not None:
+    try:
+        cam_d.dof.focus_object = _head
+        if (_head.matrix_world.translation - _head_c).length < 1.5:
+            _dof_src = f'focus_object={_head.name}'
+        else:
+            cam_d.dof.focus_object = None
+    except Exception as e:
+        p(f"    ⚠️ DOF 焦点对象设置失败: {type(e).__name__}: {str(e)[:100]}")
+if cam_d.dof.focus_object is None:
+    cam_d.dof.focus_distance = max(0.5, (cam.location - _head_c).length)
+p(f"    DOF f/{cam_d.dof.aperture_fstop}  对焦 {_dof_src}  "
+  f"距离 {cam_d.dof.focus_distance:.2f}  头心 "
+  f"{tuple(round(v,2) for v in _head_c)}")
 
 # 视线检测（坑 41：先隐藏角色与剑）
 bpy.context.view_layer.update()
@@ -887,7 +1141,57 @@ for o, hv in stash:
         pass
 p(f"    射线检测: {'命中 ' + str(hobj.name) if hit else '视线通畅'}")
 
+# ============================================================
+# ---- 体积雾（优化方案 P1-1）----
+#   ⚠️ 世界体积（world volume）在 5.2 里【必黑】，实测过，不要用。
+#   这里做的是【有限体积盒】：一个包住角色周围空间的立方体，
+#   挂只含 Volume 输出的材质。任何一步异常 → 整体回退成"无雾"，
+#   绝不让雾把渲染搞挂（渲染失败比没雾严重得多）。
+# ============================================================
+p("\n[8.5] 体积雾（有限体积盒）")
+fog_ok = False
+fog_box = None
+if not FOG_ON:
+    p("    (DSH_MC_FOG=0，无雾)")
+else:
+    try:
+        _fzh = 75.0
+        _fzc = C + fw * 2.0
+        bpy.ops.mesh.primitive_cube_add(
+            size=2.0, location=(_fzc.x, _fzc.y, GROUND - 1.0 + _fzh))
+        fog_box = bpy.context.active_object
+        fog_box.name = "FogVolume"
+        fog_box.scale = (_fzh, _fzh, _fzh)
+        _fmt = bpy.data.materials.new("FogVol")
+        _fmt.use_nodes = True
+        _fnt = _fmt.node_tree
+        for n in list(_fnt.nodes):
+            _fnt.nodes.remove(n)
+        _fo = _fnt.nodes.new("ShaderNodeOutputMaterial")
+        _fv = _fnt.nodes.new("ShaderNodeVolumePrincipled")
+        _fv.inputs['Color'].default_value = (1.0, 0.92, 0.80, 1.0)
+        _fv.inputs['Density'].default_value = 0.0026
+        _fv.inputs['Anisotropy'].default_value = 0.52
+        _fnt.links.new(_fv.outputs['Volume'], _fo.inputs['Volume'])
+        fog_box.data.materials.append(_fmt)
+        try_set(fog_box, 'visible_shadow', False, 'FogVolume.visible_shadow')
+        try_set(fog_box, 'hide_select', True, 'FogVolume.hide_select')
+        fog_ok = True
+        p(f"    体积盒 {_fzh*2:.0f}×{_fzh*2:.0f}×{_fzh*2:.0f} "
+          f"密度 0.0026 各向异性 0.52 色 (1.0,0.92,0.80)")
+    except Exception as e:
+        p(f"    ⚠️ 建雾失败({type(e).__name__}: {str(e)[:140]}) → 回退无雾")
+        if fog_box is not None:
+            try:
+                bpy.data.objects.remove(fog_box, do_unlink=True)
+            except Exception:
+                pass
+            fog_box = None
+        fog_ok = False
+
+# ============================================================
 # ---- 渲染设置 ----
+# ============================================================
 p("\n[9] 渲染设置")
 scn = bpy.context.scene
 for cand in ('BLENDER_EEVEE_NEXT', 'BLENDER_EEVEE'):
@@ -902,19 +1206,131 @@ except Exception:
     pass
 scn.render.resolution_x, scn.render.resolution_y = RES_X, RES_Y
 scn.render.film_transparent = False
-vt = None
-for v in (VT, 'Filmic', 'AgX', 'Standard'):
-    try:
-        scn.view_settings.view_transform = v
-        vt = v
-        break
-    except Exception:
-        continue
+
+# ★ P0-1 色彩管理：视图转换 / look / 曝光
+vt = set_view_transform(scn, prefer=VT)
+if str(vt) != str(VT):
+    p(f"    ⚠️ 视图转换 {VT!r} 不可用 → 回落 {vt!r}")
 scn.view_settings.exposure = EXPOSURE
-scn.view_settings.look = 'None'
+look_applied = None
+for _lk in (LOOK, 'AgX - Punchy', 'None'):
+    try:
+        scn.view_settings.look = _lk
+        look_applied = _lk
+        break
+    except Exception as e:
+        p(f"    ⚠️ look {_lk!r} 不可用: {type(e).__name__}: {str(e)[:80]}")
+if look_applied is None:
+    look_applied = 'None'
+# 若最终落到 Standard，天空强度再钳一次（前面那次是按入参 VT 判的）
+if str(vt).strip().lower() == 'standard':
+    try:
+        _cur = float(bg.inputs['Strength'].default_value)
+        if _cur > 0.05:
+            bg.inputs['Strength'].default_value = 0.05
+            p(f"    ⚠️ 实际视图转换=Standard → 天空强度 {_cur:.3f} 钳到 0.05")
+    except Exception:
+        pass
+
+# ★ P1-3 接触阴影 / AO：EEVEE 的 ray tracing + fast GI
+_ee = scn.eevee
+for attr, val in (('use_raytracing', True), ('use_fast_gi', True),
+                  ('use_shadow_jitter', True), ('use_bokeh_jittered', True)):
+    try_set(_ee, attr, val, f'eevee.{attr}')
+_ro = getattr(_ee, 'ray_tracing_options', None)
+if _ro is not None:
+    for attr, val in (('resolution_scale', '1'), ('use_denoise', True),
+                      ('trace_max_roughness', 0.5)):
+        try_set(_ro, attr, val, f'ray_tracing.{attr}')
+else:
+    p("    ⚠️ 没有 ray_tracing_options（版本差异），跳过接触阴影细分参数")
+_fg = getattr(_ee, 'fast_gi_options', None)
+if _fg is not None:
+    for attr, val in (('method', 'GLOBAL_ILLUMINATION'), ('distance', 2.5),
+                      ('quality', 0.5), ('thickness', 0.3),
+                      ('ray_count', 8), ('step_count', 8)):
+        try_set(_fg, attr, val, f'fast_gi.{attr}')
+else:
+    p("    ⚠️ 没有 fast_gi_options（版本差异），跳过 AO 细分参数")
+
+# ★ P1-1 体积参数（tile_size 是字符串枚举：'2','4','8','16'）
+if fog_ok:
+    for attr, val in (('volumetric_start', 0.4), ('volumetric_end', 200.0),
+                      ('volumetric_samples', 96),
+                      ('volumetric_sample_distribution', 0.85),
+                      ('volumetric_light_clamp', 0.0),
+                      ('use_volumetric_shadows', True),
+                      ('volumetric_tile_size', '4')):
+        try_set(_ee, attr, val, f'eevee.{attr}')
+
 scn.render.filepath = os.path.join(OUT, "封面_世界")
 scn.render.image_settings.file_format = 'PNG'
-p(f"    {scn.render.engine} / {SAMPLES} 采样 / 视图转换={vt} / {RES_X}x{RES_Y}")
+p(f"    {scn.render.engine} / {SAMPLES} 采样 / 视图转换={vt} / look={look_applied} / "
+  f"曝光{EXPOSURE:+.2f} / {RES_X}x{RES_Y}")
+
+
+# ============================================================
+# ---- P0-0 审图框：把角色身体包围盒投影成像素框 ----
+#   pipeline 会把这个框传给 vision_check，让它"在框里判是什么"，
+#   而不是按颜色满画面找主体（大草原背景绿/天空蓝，颜色判据不可靠）。
+# ============================================================
+def project_subject_box():
+    """返回 (box, raw, notes)。box 为 [x0,y0,x1,y1] 像素（左上原点）。"""
+    try:
+        from bpy_extras.object_utils import world_to_camera_view
+    except Exception as e:
+        return None, None, [f"world_to_camera_view 不可用: {e}"]
+    bmin, bmax = eval_bbox(body)
+    if bmin is None:
+        return None, None, ["身体包围盒取不到"]
+    notes = []
+    us = []
+    vs = []
+    for cx in (bmin.x, bmax.x):
+        for cy in (bmin.y, bmax.y):
+            for cz in (bmin.z, bmax.z):
+                co = world_to_camera_view(scn, cam, mathutils.Vector((cx, cy, cz)))
+                if co.z <= 0:
+                    notes.append("有角点在相机后方（z<=0）")
+                us.append(co.x)
+                vs.append(co.y)
+    u0, u1 = min(us), max(us)
+    v0, v1 = min(vs), max(vs)
+    raw = [round(u0 * RES_X, 1), round((1.0 - v1) * RES_Y, 1),
+           round(u1 * RES_X, 1), round((1.0 - v0) * RES_Y, 1)]
+    x0, y0, x1, y1 = raw
+    # 轴对齐盒含空气（举臂/侧身时更明显）→ 向内收 2%/边 补偿
+    ix = (x1 - x0) * 0.02
+    iy = (y1 - y0) * 0.02
+    box = [x0 + ix, y0 + iy, x1 - ix, y1 - iy]
+    # 夹到画面内
+    box = [min(max(0.0, box[0]), RES_X), min(max(0.0, box[1]), RES_Y),
+           min(max(0.0, box[2]), RES_X), min(max(0.0, box[3]), RES_Y)]
+    box = [int(round(v)) for v in box]
+    if box[2] - box[0] < 4 or box[3] - box[1] < 4:
+        return None, raw, notes + [f"投影框太小 {box}"]
+    return box, raw, notes
+
+
+_subject_box = None
+_subject_raw = None
+_subject_notes = []
+if not body:
+    _subject_notes.append("没有身体网格（空镜）→ 不投影主体框")
+else:
+    _subject_box, _subject_raw, _subject_notes = project_subject_box()
+if _subject_notes:
+    for _n in _subject_notes:
+        p(f"    ⚠️ 审图框: {_n}")
+p(f"    主体框 {_subject_box}  （原始投影 {_subject_raw}，画面 {RES_X}x{RES_Y}）")
+try:
+    with open(os.path.join(OUT, '_subject_box.json'), 'w', encoding='utf-8') as f:
+        json.dump({'subject_box': _subject_box, 'raw': _subject_raw,
+                   'size': [RES_X, RES_Y],
+                   'source': 'world_to_camera_view(body eval_bbox)',
+                   'notes': _subject_notes}, f, ensure_ascii=False, indent=2)
+except Exception as e:
+    p(f"    ⚠️ 写 _subject_box.json 失败: {e}")
 
 blend = os.path.join(OUT, "封面_世界.blend")
 bpy.ops.wm.save_as_mainfile(filepath=blend)
