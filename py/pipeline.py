@@ -9,6 +9,7 @@
 渲染完先跑 vision_check，不合格就按问题类型自动改参数重渲。
 """
 import json
+import glob
 import os
 import shutil
 import subprocess
@@ -127,9 +128,52 @@ def resolve_assets(config=None):
             if cfg.get(k):
                 v = cfg[k]
                 break
-        if not v and kind in man:
-            v = man[kind].get('dst') or man[kind].get('src')
+        if not v:
+            # manifest 的键名和这里的别名不一定一致（item 在清单里叫 item_rig），
+            # 所以按 keys 里任何一个名字去查，而不是只查 kind。
+            for k in ((kind,) + tuple(keys)):
+                ent = man.get(k)
+                if isinstance(ent, dict):
+                    v = ent.get('dst') or ent.get('src')
+                    if v:
+                        break
         out[kind] = v
+
+    # manifest 没记全（比如只记了贴图）→ 直接看 vendor 目录里实际有什么。
+    # 这条很关键：装配时写过 manifest 之后再手工补放素材，manifest 不会自己更新，
+    # 结果就是「素材明明在 vendor 里，插件却说没装」。
+    try:
+        import setup_assets as _sa
+        vdir = getattr(_sa, 'VENDOR', '')
+        if vdir and os.path.isdir(vdir):
+            if not out.get('rig'):
+                hits = sorted(glob.glob(os.path.join(vdir, 'rig', '*.blend')))
+                if hits:
+                    out['rig'] = hits[0]
+            if not out.get('item'):
+                cand = os.path.join(vdir, 'item')
+                if os.path.isdir(cand):
+                    out['item'] = cand
+    except Exception:
+        pass
+
+    # manifest 没记全（比如只记了贴图）→ 直接看 vendor 目录里实际有什么。
+    # 这条很关键：装配时写过 manifest 之后再手工补放素材，manifest 不会自己更新，
+    # 结果就是「素材明明在 vendor 里，插件却说没装」。
+    try:
+        import setup_assets as _sa
+        vdir = getattr(_sa, 'VENDOR', '')
+        if vdir and os.path.isdir(vdir):
+            if not out.get('rig'):
+                hits = sorted(glob.glob(os.path.join(vdir, 'rig', '*.blend')))
+                if hits:
+                    out['rig'] = hits[0]
+            if not out.get('item'):
+                cand = os.path.join(vdir, 'item')
+                if os.path.isdir(cand):
+                    out['item'] = cand
+    except Exception:
+        pass
 
     # manifest 也没有 → 现场扫一遍（只扫默认位置，不递归太深）
     missing = [k for k in ('rig', 'item') if not out.get(k)]
