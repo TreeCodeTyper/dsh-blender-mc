@@ -483,7 +483,8 @@ def animate(blender_exe, blend, out_dir, total=240, fps=24, kind='aura',
     只渲【帧序列】：插件不替你合成视频 —— 转 MP4/GIF 需要用 ffmpeg，
     命令会由 cli 打印出来（见 cmd_anim）。
     """
-    script = os.path.join(BLENDER_DIR, 'animate_aura.py' if kind == 'aura'
+    script = os.path.join(BLENDER_DIR,
+                          'animate_killaura.py' if kind == 'killaura'
                           else 'animate_aura.py')
     os.makedirs(out_dir, exist_ok=True)
     out_dir = os.path.abspath(out_dir)      # 同上：相对路径 Blender 会写不进去

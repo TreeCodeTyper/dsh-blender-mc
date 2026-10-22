@@ -134,6 +134,7 @@ def cmd_anim(a):
     from pipeline import animate, find_blender
     b = find_blender(a.blender)
     r = animate(b, a.blend, a.out, total=a.frames, fps=a.fps,
+                kind=getattr(a, 'preset', 'killaura'),
                 preview=a.preview, progress=print)
     print(f"\n动画工程: {r['blend']}")
     if r.get('frames'):
@@ -224,6 +225,8 @@ def main():
     n.add_argument('--frames', type=int, default=240)
     n.add_argument('--fps', type=int, default=24)
     n.add_argument('--preview', default=None, help='只渲这些帧，如 1,60,120')
+    n.add_argument('--preset', choices=['killaura', 'aura'], default='killaura',
+                   help='killaura=进圈就死（默认）；aura=挥砍+装饰光环')
     n.set_defaults(func=cmd_anim)
 
     c = sub.add_parser('check', help='只审图')
