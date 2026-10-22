@@ -96,61 +96,67 @@ aura_root = bpy.data.objects.new("AuraRoot", None)
 sc.collection.objects.link(aura_root)
 aura_root.location = (AX, AY, CHEST)
 
-# 主环
+# 主环（头顶光环）
+# ⚠️ 0.3.0：原来环心在 CHEST、半径 1.15 —— 正对镜头时环是【一根横穿胸口的白条】，
+#   挡人物、还因为 emission 太高直接过曝成白板。改成肩上方的小环（贴头像光环），
+#   压扁一点、亮度降到 1.8，让轮廓留在画面上部。
+RING_Z = CHEST + 0.95
+RING_R2 = 0.70
 bpy.ops.mesh.primitive_torus_add(
-    major_radius=RING_R, minor_radius=0.045,
+    major_radius=RING_R2, minor_radius=0.04,
     major_segments=48, minor_segments=8,
-    location=(AX, AY, CHEST))
+    location=(AX, AY, RING_Z))
 ring = bpy.context.active_object
 ring.name = "AuraRing"
-ring.data.materials.append(emis_mat("AuraRingMat", CYAN, 2.6))
+ring.scale = (1.0, 1.0, 0.55)
+ring.data.materials.append(emis_mat("AuraRingMat", CYAN, 1.8))
 ring.parent = aura_root
 ring.matrix_parent_inverse = aura_root.matrix_world.inverted()
 
-# 6 片刃片（细长立方体，绕环均布，斜插）
-blades = []
-for i in range(6):
-    a = i * math.tau / 6
+# 8 片刃片（细长立方体，绕环均布，斜插）
+# ⚠️ 0.3.0：原来是 6 片 0.05×0.22×0.58 的大板子，渲出来像"纸板风车"。
+#   改成 8 片更细更短的碎片，亮度 2.2（不再过曝成白板）。
+BLADE_N = 8
+BLADES = []
+for i in range(BLADE_N):
+    a = i * math.tau / BLADE_N
     bpy.ops.mesh.primitive_cube_add(size=1.0,
-                                    location=(AX + math.cos(a) * RING_R,
-                                              AY + math.sin(a) * RING_R,
-                                              CHEST))
+                                    location=(AX + math.cos(a) * RING_R2,
+                                              AY + math.sin(a) * RING_R2,
+                                              RING_Z))
     b = bpy.context.active_object
     b.name = f"AuraBlade{i}"
-    b.scale = (0.05, 0.22, 0.58)
-    b.rotation_euler = (math.radians(-22), 0, a)
-    b.data.materials.append(emis_mat(f"AuraBladeMat{i}", CYAN, 1.8))
+    b.scale = (0.03, 0.07, 0.30)
+    b.rotation_euler = (math.radians(-28), 0, a)
+    b.data.materials.append(emis_mat(f"AuraBladeMat{i}", CYAN, 2.2))
     b.parent = aura_root
     b.matrix_parent_inverse = aura_root.matrix_world.inverted()
-    blades.append(b)
+    BLADES.append(b)
 
-# 第二层反向环（品红，略小，反向转）
+# 地面魔法阵（品红）
+# ⚠️ 0.3.0：原来是 CHEST-0.55，正好切在大腿上（渲出来像呼啦圈穿腿）。
+#   改成脚底贴地的薄环。
+GROUND = AZ + 0.06
 bpy.ops.mesh.primitive_torus_add(
-    major_radius=RING_R * 0.78, minor_radius=0.035,
-    major_segments=40, minor_segments=8,
-    location=(AX, AY, CHEST - 0.55))
+    major_radius=RING_R * 1.25, minor_radius=0.035,
+    major_segments=64, minor_segments=8,
+    location=(AX, AY, GROUND))
 ring2 = bpy.context.active_object
 ring2.name = "AuraRing2"
-ring2.data.materials.append(emis_mat("AuraRing2Mat", MAGENTA, 2.2))
+ring2.scale = (1.0, 1.0, 0.35)
+ring2.data.materials.append(emis_mat("AuraRing2Mat", MAGENTA, 2.8))
 ring2.parent = aura_root
 ring2.matrix_parent_inverse = aura_root.matrix_world.inverted()
-p(f"    主环 r={RING_R} @ z={CHEST:.2f}；6 片刃片；内层品红环 r={RING_R*0.78:.2f}")
+p(f"    主环 r={RING_R} @ z={CHEST:.2f}；{BLADE_N} 片刃片；"
+  f"地面魔法阵 r={RING_R*1.25:.2f} @ z={GROUND:.2f}")
 
-# ============ ② 斩击弧光 ============
-p("\n[2] 斩击弧光")
-bpy.ops.mesh.primitive_torus_add(
-    major_radius=1.55, minor_radius=0.10,
-    major_segments=40, minor_segments=6,
-    location=(AX, AY, CHEST + 0.15))
-slash = bpy.context.active_object
-slash.name = "SlashArc"
-slash.scale = (1.0, 1.0, 0.35)
-sm = emis_mat("SlashMat", (0.75, 1.0, 1.0), 5.0)
-slash.data.materials.append(sm)
-slash.parent = aura_root
-slash.matrix_parent_inverse = aura_root.matrix_world.inverted()
-# 用缩放做"闪现"：平时缩到 0
-slash.scale = (0.01, 0.01, 0.01)
+# ============ ② 斩击弧光（0.3.0 起停用）============
+# ⚠️ 0.3.0：原来是一个 r=1.55 的水平圆环，靠缩放做"闪现"。
+#   正对镜头时它被看成【一根横贯画面、过曝成纯白的长条】，一次挥砍闪三帧，
+#   比"没有特效"还糟。与其留着一个必然穿帮的环，不如去掉，
+#   让运动模糊 + 光环自己承担节奏。
+p("\n[2] 斩击弧光：已停用（旧的水平环在正面机位会糊成白条）")
+slash = None
 
 # ============ ③ 关键帧 ============
 p("\n[3] 打关键帧")
@@ -245,26 +251,13 @@ for i in range(0, TOTAL + 1, 20):
     pulse.append((max(1, i), (s, s, s)))
 key_obj(aura_root, 'scale', pulse, is_scale=True)
 
-# --- 斩击弧光：只在挥砍瞬间闪现 ---
-key_obj(slash, 'scale', [
-    (1, (0.01,) * 3),
-    (52, (0.01,) * 3),
-    (58, (1.15, 1.15, 1.0)),      # 第一刀
-    (66, (0.01,) * 3),
-    (144, (0.01,) * 3),
-    (150, (1.15, 1.15, 1.0)),     # 第二刀
-    (160, (0.01,) * 3),
-    (TOTAL, (0.01,) * 3),
-], is_scale=True)
-key_obj(slash, 'rot', [
-    (1, (0, 0, 0)), (TOTAL, (0, 0, 720)),
-], is_rot=True)
+# --- 斩击弧光已停用（slash is None），挥砍节奏交给运动模糊 + 光环 ---
 
 # 插值：挥砍用 BEZIER 默认够用，光环设成线性更均匀
 # ⚠️ 坑 R17：Blender 4.4+ 的 Action 没有 .fcurves，必须走
 #    layers → strips → channelbags。用共用的兼容层。
 from _compat import set_all_interpolation      # noqa: E402
-for obj in (aura_root, ring2, slash):
+for obj in (aura_root, ring2):
     ad = obj.animation_data
     if ad and ad.action:
         n = set_all_interpolation(ad.action, 'LINEAR')
@@ -287,14 +280,78 @@ except Exception:
 sc.render.resolution_x, sc.render.resolution_y = 960, 540
 sc.render.image_settings.file_format = 'PNG'
 sc.render.film_transparent = False
-for v in ('Standard', 'Filmic', 'AgX'):
-    try:
-        sc.view_settings.view_transform = v
-        break
-    except Exception:
-        continue
+# ⚠️ 坑 R21：原来这里写 `for v in ('Standard','Filmic','AgX')` —— Standard 永远成功，
+#   于是动画一律走 Standard，和 AgX 渲出来的封面完全是两个颜色（灰、平、死白）。
+try:
+    from _compat import set_view_transform
+    vt = set_view_transform(sc, prefer='AgX')
+except Exception as _e:
+    vt = None
+    p(f"    !! 色彩管理兼容层不可用: {_e}")
+if not vt:
+    for v in ('AgX', 'Filmic', 'Standard'):
+        try:
+            sc.view_settings.view_transform = v
+            break
+        except Exception:
+            continue
+try:
+    sc.view_settings.look = 'AgX - Punchy'
+except Exception:
+    pass
+# 运动模糊：挥砍只有 4~6 帧，没有模糊的话看起来像"瞬移"
+try:
+    sc.render.use_motion_blur = True
+    sc.render.motion_blur_shutter = 0.45
+    sc.render.motion_blur_position = 'CENTER'
+except Exception as _e:
+    p(f"    !! 运动模糊不可用: {_e}")
+# 辉光：EEVEE 没有 bloom，用合成器 Glare（Fog Glow）给能量环/刃片做溢光
+# ⚠️ Blender 5.x 把合成器节点树挪到了 scene.compositing_node_group，
+#    4.x 及更早是 scene.node_tree —— 两个都试，都没有就跳过（不影响出图）。
+try:
+    nt = None
+    for attr in ('node_tree', 'compositing_node_group'):
+        cand = getattr(sc, attr, None)
+        if cand is not None and hasattr(cand, 'nodes'):
+            nt = cand
+            break
+    if nt is None:
+        raise RuntimeError('这个版本没有可用的合成器节点树')
+    for n in list(nt.nodes):
+        if n.type == 'GLARE':
+            nt.nodes.remove(n)
+    rl = next(n for n in nt.nodes if n.type == 'R_LAYERS')
+    comp = next(n for n in nt.nodes if n.type == 'COMPOSITE')
+    gl = nt.nodes.new('CompositorNodeGlare')
+    gl.glare_type = 'FOG_GLOW'
+    gl.quality = 'HIGH'
+    gl.threshold = 1.0
+    gl.size = 7
+    gl.mix = -0.35
+    nt.links.new(rl.outputs['Image'], gl.inputs['Image'])
+    nt.links.new(gl.outputs['Image'], comp.inputs['Image'])
+    p("    合成器 Glare: Fog Glow / threshold 1.0 / size 7")
+except Exception as _e:
+    p(f"    !! 辉光节点不可用: {_e}")
+
+# 运镜：10 秒缓慢推进 + 轻微升高（原来相机完全静止，视频像一张会动的静帧）
+cam = sc.camera
+if cam:
+    c0 = tuple(cam.location)
+    d = mathutils.Vector((AX - c0[0], AY - c0[1], 0.0))
+    if d.length > 0.01:
+        d.normalize()
+        push = d * 2.6          # 推进 2.6 格
+        key_obj(cam, 'location', [
+            (1, c0),
+            (max(2, TOTAL // 2), (c0[0] + push.x * 0.45, c0[1] + push.y * 0.45, c0[2] + 0.10)),
+            (TOTAL, (c0[0] + push.x, c0[1] + push.y, c0[2] + 0.22)),
+        ])
+        p(f"    运镜：推进 {push.length:.1f} 格 + 升高 0.22")
+
 sc.render.filepath = os.path.join(OUT, "frame_")
-p(f"    {sc.render.engine} / 48 采样 / 960x540 / {TOTAL} 帧 @ {FPS}fps")
+p(f"    {sc.render.engine} / 48 采样 / 960x540 / {TOTAL} 帧 @ {FPS}fps / {vt}")
 
 blend = os.path.join(OUT, "杀戮光环.blend")
 bpy.ops.wm.save_as_mainfile(filepath=blend)

@@ -18,70 +18,7 @@
 
 ---
 
-## [0.3.3] - 2026-10-22
-
-拿到你上传的真实整合包存档（方可梦世界，428 个 region）后复测暴露的问题。
-
-### 修复
-- **找不到机位**：`py/scan.py` 的地表判定把树冠/植物/水面也算成「最高方块」，
-  森林和装饰密集的地图整片地表都是 `oak_leaves`，「15×15 同高度草地」一个都不满足，
-  `mc_scan` 返回 0 个机位、`mc_shoot` 直接失败。现在跳过 `DECOR`（叶子/水/草/花/雪片…）。
-- **仍然找不到时不再直接放弃**：`pick_from_save` 会逐级放宽（15×15 → 7×7 → 4×4 → 2×2，
-  草地要求也放宽到任意可站方块），最后兜底用「5×5 内至少 9 格同高度」+ 开阔度挑落点，
-  日志会写明放宽到了哪一级。你那张地图实测：15×15 一个都没有 → 4×4 找到 3 个。
-
-### 验证
-- `mc_scan({ map: "方可梦世界" })` → 3 个机位；按推荐机位出图 960×540，审图 WARN 78
-  （朝向/构图/接地/曝光全部通过，只剩「背光方向的天空没有高光」）。
-
----
-
-## [0.3.2] - 2026-10-22
-
-「设置 → 背景地图」在 0.3.1 里其实**一个请求都没进来过**，这版把它修通了。
-
-### 修复
-- **上传入口整条路由没挂上**：`lib/index.js` 把外层 `ctx` 传给了 `registerMapRoutes`，
-  在它上面读 `ctx.webServer` 会抛 `cannot get property "webServer" without inject`，
-  被 try/catch 吞成一条 warn。改为用 `ctx.inject(['webServer'], scope => mountMapRoutes(scope))`
-  的**注入作用域**注册。现在 `GET /api/blender-mc/maps` 会正常返回列表（此前是宿主兜底的 401）。
-- **地图库多套了一层 `maps/maps/`**：`default_root()` 与前端 `defaultMapsDir()` 都返回
-  `<DSH_HOME>/blender-mc/maps`，而布局本身还要拼 `maps/<id>`。统一成库根
-  `<DSH_HOME>/blender-mc`（存档在 `maps/<id>/world`），并给 `resolve_world` 加了
-  路径失效自愈（记录里的绝对路径对不上就按库根重算并回写）。
-- **大存档被前端挡在门外**：`lib/client.js` 的 `DEFAULT_MAX_UPLOAD` 兜底写的是 200 MB，
-  而宿主默认 2048 MB。列表请求一旦没拿到 `limits`，989 MB 的整合包会被判「超过上限」
-  且**不发请求**，看起来像插件没反应。兜底改成 2048 MiB。
-- **「世界范围」算成 1300 万格**：`_region_stats()` 用 min/max，整合包残留的离群
-  region（`r.25931.-58593.mca` 这种）会把包围盒撑爆。改为按「相距 ≤8 个 region 的
-  主簇」取包围盒，并把被丢掉的 region 数记在 `bounds.outliers`；出生点落在主簇外时
-  扩展范围而不是丢掉出生点。
-- **带 BOM 的 job 文件解析失败**：`_read_json()` 改 `utf-8-sig`（PowerShell 5.1
-  `Set-Content -Encoding utf8` 会写 BOM），此前会误报 `map.no-file 缺少 --zip`。
-
-### 升级注意
-- 0.3.1 之前入的库如果出现 `maps/maps/<id>`，可用 `python py/cli.py map doctor` 查看，
-  或直接按上面的布局手动把内层 `maps/*` 上移一层；`resolve_world` 也会自愈路径。
-
----
-
-## [0.3.1] - 2026-10-22
-
-**装机后插件加载失败（`cannot get property "webServer" without inject`）的修复，外加朝向/剑挡脸两个出图硬伤。**
-
-### 修复
-
-- **插件加载失败**：0.3.0 用 `ctx.get('webServer')` 探测可选服务，cordis 的 `ctx.get(名字)` 要求该服务在
-  `inject` 列表里，否则直接抛 `cannot get property "webServer" without inject`，整个插件加载器那一条
-  报 Error、7 个 `mc_*` 工具和设置页一起消失。改为**只走 `ctx.inject(['webServer'], …)`**（服务在场才回调，
-  缺席就安静跳过），背景地图接口不再有"探活"这一步。
-- **朝向对不上镜头**：改用几何量测的朝向搜索（见 0.3.0 那条的展开），日志会打 `★ 朝向搜索：yaw … 夹角 …`。
-- **剑挡脸**：剑的方向向量改到角色局部系（`+X` 右手侧 / `+Z` 上 / `−Y` 正面），先按 `yaw` 绕 Z 旋转再建矩阵。
-- 天空强度默认 `0.20 → 0.12`（`sky_hot_ratio` 实测 0.79 太平，降到 0.12 才有暖色层次）。
-
----
-
-## [0.3.0] - 2026-10-21
+## [0.3.0] - 2026-10-22
 
 **两个大件：① 在 DSH 设置页就能上传背景地图（不用再翻存档路径）；② 渲染质量按「色彩管理 → 太阳 → 天空 → 三灯 → 相机 → 雾 → 审图」整条链重做。**
 
@@ -158,6 +95,43 @@
 - 天空过曝：`sky_hot_ratio` 实测 0.79（整片近白），`--sky` 默认降到 0.12 后回到有层次的暖色渐变。
 - `mc_scan` / `mc_shoot` 的 `required` 调整（`scan` 可全空、`shoot` 只要 `out`），配合 `map` 参数。
 - 教程补「第 1.5 步：把存档传进 DSH」。
+- **插件在装好后整条加载失败**（`cannot get property "webServer" without inject`）：曾用 `ctx.get('webServer')`
+  探测可选服务，而 cordis 的 `ctx.get(名字)` 要求该服务在 `inject` 列表里，否则直接抛错，
+  整个加载器条目报 Error、7 个 `mc_*` 工具和设置页一起消失。现在只走
+  `ctx.inject(['webServer'], scope => mountMapRoutes(scope))`（服务在场才回调，缺席就安静跳过）。
+- **上传入口一条请求都进不来**：`lib/index.js` 把外层 `ctx` 传给了 `registerMapRoutes`，
+  在它上面读 `ctx.webServer` 抛错被 try/catch 吞成一条 warn，prefix 路由根本没注册
+  （`GET /api/blender-mc/maps` 落到宿主兜底的 401）。改用注入作用域后复测 200。
+- **地图库多套了一层 `maps/maps/`**：`default_root()` 与前端 `defaultMapsDir()` 都返回
+  `<DSH_HOME>/blender-mc/maps`，而布局本身还要拼 `maps/<id>`。统一成库根
+  `<DSH_HOME>/blender-mc`（存档在 `maps/<id>/world`），并给 `resolve_world` 加路径失效自愈。
+- **大存档被前端挡在门外**：`lib/client.js` 的 `DEFAULT_MAX_UPLOAD` 兜底写 200 MB，宿主默认 2048 MB。
+  列表请求一旦没拿到 `limits`，989 MB 的整合包被判「超过上限」且**不发请求**，看起来像插件没反应。
+- **世界范围算成 1300 万格**：`_region_stats()` 用 min/max，整合包残留的离群 region
+  （`r.25931.-58593.mca` 这种）把包围盒撑爆。改为按「相距 ≤8 个 region 的主簇」取包围盒，
+  丢弃数记进 `bounds.outliers`；出生点落在主簇外时扩展范围而不是丢掉出生点。
+- **带 BOM 的 job 文件解析失败**：`_read_json()` 改 `utf-8-sig`（PowerShell 5.1 写 BOM），
+  此前会误报 `map.no-file 缺少 --zip`。
+- **整包地图找不到机位（0 个）**：`py/scan.py` 的地表判定把树冠/植物/水面也算成「最高方块」，
+  森林里整片地表都是 `oak_leaves`，「15×15 同高度草地」一个都不满足。现在跳过
+  `DECOR`（叶子/水/草/花/雪片…）；仍然找不到时逐级放宽（15×15 → 7×7 → 4×4 → 2×2，
+  草地要求放宽到任意可站方块），最后兜底用「5×5 内至少 9 格同高度」+ 开阔度挑落点。
+  实测「方可梦世界」：15×15 一个都没有 → 4×4 找到 3 个。
+
+### 新增：10 秒动画（「杀戮光环」重做）
+
+- **色彩管理和封面不再是两个世界**：`animate_aura.py` 原来按 `('Standard','Filmic','AgX')` 顺序试
+  视图变换，Standard 永远成功 → 动画一直走 Standard、灰扑扑。改成直接调
+  `_compat.set_view_transform(scene, prefer='AgX')`，并加 `look='AgX - Punchy'`。
+- **光环从「纸板风车」改成「头顶光环 + 地面魔法阵」**：主环原来 r=1.15 挂在胸口，正对镜头就是
+  一根横穿人物的白条 —— 现在挪到肩上方（`CHEST + 0.95`、r=0.70、压扁 0.55、emission 1.8）；
+  品红环原来在 `CHEST - 0.55` 切大腿（像呼啦圈），改成贴地的魔法阵（`AZ + 0.06`、r=1.44）。
+- **刃片**：6 片 `0.05×0.22×0.58`（像大板子）→ 8 片 `0.03×0.07×0.30`，emission 2.2。
+- **斩击弧光停用**：旧的水平圆环 r=1.55 在正面机位糊成一根过曝白条，比没有更糟。
+- **运镜 + 运动模糊**：相机按「朝角色推进 2.6 格 + 升高 0.22」打关键帧（原来完全静止），
+  开 `use_motion_blur`（shutter 0.45、CENTER），挥砍终于有拖影。
+- 已知限制：这个 Blender 版本没有可用的合成器节点树（`Scene.node_tree` 不存在，
+  `compositing_node_group` 也没有），所以**没有辉光**，发光件边缘是硬边。
 
 ---
 
