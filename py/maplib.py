@@ -518,6 +518,16 @@ def dto(meta, root=None):
     m = dict(meta)
     m.setdefault('boundsKnown', bool(m.get('bounds')))
     m['hasThumb'] = bool(m.get('thumb'))
+    # ★ area 不能只在入库那一刻算一次：它取决于 suggest_area 的 half，
+    #   也取决于 bounds 自愈之后的范围。冻结在 meta 里会害死老地图 ——
+    #   ±240 时代入库的图，扫描范围永远只有出生点旁边那一小块（全是石砖广场）。
+    if m.get('bounds'):
+        try:
+            fresh = suggest_area(m['bounds'], m.get('spawn'))
+            if fresh:
+                m['area'] = fresh
+        except Exception:
+            pass
     return m
 
 
