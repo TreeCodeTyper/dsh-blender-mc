@@ -15,6 +15,10 @@
   物品库、ffmpeg 全没了。表现是「明明装过，出图却只有风景没有人」。
   现在 `vendor` 默认指向 `<DSH_HOME 或 ~/.dsh>/blender-mc/vendor`；
   只有那里还没有 `manifest.json` 时才回落到插件内的 `vendor/`（本地开发布局）。
+- **素材清单（manifest.json）和代码对不上**：装配时只写了 `textures`，
+  清单里手持物品叫 `item_rig`，而代码只查 `item` 这个名字 —— 于是
+  「素材明明在 vendor 里，插件偏说没装」。现在按别名逐个查，
+  而且只要 `vendor/rig/*.blend`、`vendor/item/` 实际存在就直接认。
 - **推荐扫描范围被冻结在入库那一刻**：`suggest_area()` 的 `half` 改了也没用，
   因为 `meta.json` 里存着导入时算好的 `area`，之后 `mc_scan/mc_shoot` 一直用它
   → ±240 时代入库的地图永远只扫出生点旁边那一小块（全是石砖广场）。
