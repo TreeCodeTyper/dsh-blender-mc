@@ -710,24 +710,73 @@ ELBOW_ROT = _rot3(os.environ.get('DSH_ARM_ELBOW'), (-85.0, 0.0, 0.0))
 WRIST_ROT = _rot3(os.environ.get('DSH_ARM_WRIST'), (0.0, 0.0, 6.0))
 
 
+# ★ 姿势预设（动作效果）：光调手臂角度做不出「帅气」，
+#   得有躯干拧转 + 头转 + 另一只手的配平，剪影才立得住。
+#   DSH_POSE=hero|guard|legacy 切换，默认 hero。
+POSES = {
+    # 举剑英雄姿：躯干朝镜头拧 12°、头再补 8° 看向镜头，
+    # 右臂抬到肩高外张 34°（剑在头外侧，不糊脸），左臂往后收做配平。
+    'hero': {
+        'Torso': (-4.0, 0.0, -12.0),
+        'Head': (2.0, 0.0, 8.0),
+        'Top Arm.R': (-14.0, 0.0, 26.0),
+        'Bottom Arm.R': (-28.0, 0.0, 0.0),
+        'Hand.R': (0.0, 0.0, 6.0),
+        'Top Arm.L': (-14.0, 0.0, -20.0),
+        'Bottom Arm.L': (-38.0, 0.0, 0.0),
+        'Hand.L': (0.0, 0.0, -8.0),
+    },
+    # 举过头顶：拳头升到头顶以上，剑尖再往上 —— 剪影最清楚，脸完全不被挡。
+    'raise': {
+        'Torso': (-3.0, 0.0, -10.0),
+        'Head': (3.0, 0.0, 10.0),
+        'Top Arm.R': (-96.0, 0.0, 26.0),
+        'Bottom Arm.R': (-12.0, 0.0, 0.0),
+        'Hand.R': (0.0, 0.0, 0.0),
+        'Top Arm.L': (-12.0, 0.0, -22.0),
+        'Bottom Arm.L': (-30.0, 0.0, 0.0),
+        'Hand.L': (0.0, 0.0, -8.0),
+    },
+    # 横持警戒姿：剑横在身前，左手压住剑脊（双手感），躯干略前倾。
+    'guard': {
+        'Torso': (6.0, 0.0, -8.0),
+        'Head': (-2.0, 0.0, 6.0),
+        'Top Arm.R': (-48.0, 0.0, 18.0),
+        'Bottom Arm.R': (-70.0, 0.0, 0.0),
+        'Hand.R': (0.0, 0.0, 4.0),
+        'Top Arm.L': (-42.0, 0.0, -26.0),
+        'Bottom Arm.L': (-64.0, 0.0, 0.0),
+        'Hand.L': (0.0, 0.0, -6.0),
+    },
+    # 旧姿势（0.2.x 的站桩抬手），保留用于对比/回退。
+    'legacy': {
+        'Top Arm.R': (-40.0, 0.0, 42.0),
+        'Bottom Arm.R': (-85.0, 0.0, 0.0),
+        'Hand.R': (0.0, 0.0, 6.0),
+    },
+}
+
+
 def pose_right_arm():
-    """把右臂摆成举剑姿势（FK，三根 pose bone）。"""
+    """按预设摆角色（FK）。主要动右臂，同时带躯干/头/左臂。"""
     if not arm:
-        return False
-    names = ('Top Arm.R', 'Bottom Arm.R', 'Hand.R')
-    if not all(n in arm.pose.bones for n in names):
-        p("    !! 找不到 Top/Bottom Arm.R 或 Hand.R，跳过摆姿势")
         return False
     if not ARM_POSE:
         p("    (DSH_ARM_POSE=0，保持默认站姿)")
         return False
-    for name, rot in zip(names, (SHOULDER_ROT, ELBOW_ROT, WRIST_ROT)):
-        pb = arm.pose.bones[name]
+    name = (os.environ.get('DSH_POSE') or 'hero').lower()
+    spec = POSES.get(name) or POSES['hero']
+    done = []
+    for bone, rot in spec.items():
+        pb = arm.pose.bones.get(bone)
+        if pb is None:
+            continue
         pb.rotation_mode = 'XYZ'
         pb.rotation_euler = tuple(math.radians(v) for v in rot)
+        done.append(f"{bone}{rot}")
     bpy.context.view_layer.update()
-    p(f"    右臂：肩{SHOULDER_ROT} 肘{ELBOW_ROT} 腕{WRIST_ROT}（FK）")
-    return True
+    p(f"    姿势 {name}：{' / '.join(done)}（FK）")
+    return bool(done)
 
 
 p("\n[4.8] 摆右臂（FK，举剑）")
@@ -835,13 +884,39 @@ if arm and any(b.name == 'Hand.R' for b in arm.data.bones):
     #   让刃向上、朝「手所在的那一侧」倒 —— 任何机位都从脸旁边出去。
     _az_sw = math.radians(CAM_AZ)
     _to_cam = mathutils.Vector((-math.cos(_az_sw), math.sin(_az_sw), 0.0)).normalized()
-    _lat = mathutils.Vector((_to_cam.y, -_to_cam.x, 0.0)).normalized()  # 画面横向
-    _v = mathutils.Vector((hand_pos.x - WX, hand_pos.y - WY, 0.0))
-    if _v.length > 1e-6 and _lat.dot(_v) < 0.0:
-        _lat = -_lat                      # 往手那一侧倒，别横穿身体
-    blade_w = (mathutils.Vector((0.0, 0.0, -1.0))
-               + _lat * 0.45
-               - _to_cam * 0.08)
+    # 倒的方向 = 「头心 → 拳头」的水平方向。这条方向天然指向身体外侧，
+    # 所以刃无论朝上还是朝下都不会穿过脸（拿画面横向去判断会翻错边）。
+    _hc = None
+    try:
+        _hb = eval_bbox([_head_obj]) if _head_obj else None
+        if _hb and _hb[0]:
+            _hc = (_hb[0] + _hb[1]) / 2.0
+    except Exception:
+        _hc = None
+    if _hc is not None:
+        _lat = mathutils.Vector((hand_pos.x - _hc.x, hand_pos.y - _hc.y, 0.0))
+    else:
+        _lat = mathutils.Vector((hand_pos.x - WX, hand_pos.y - WY, 0.0))
+    if _lat.length < 1e-4:
+        _lat = mathutils.Vector((_to_cam.y, -_to_cam.x, 0.0))
+    _lat.normalize()
+    # 往哪边倒不能猜：分别算两个方向的剑身到「头球」的最近距离，取更远的那边。
+    # （头球半径按 0.45 格估，MC 头是 0.5 立方）
+    def _seg_head_dist(_d, _len=1.35):
+        _a = hand_pos
+        _h = _hc if _hc is not None else mathutils.Vector((hand_pos.x, hand_pos.y, hand_pos.z + 0.5))
+        _ah = _h - _a
+        _t = max(0.0, min(_len, _ah.dot(_d)))
+        return (_ah - _d * _t).length
+    _up = mathutils.Vector((0.0, 0.0, 1.0))
+    _best = None
+    for _sg in (1.0, -1.0):
+        _d = (_up + _lat * (0.95 * _sg) - _to_cam * 0.06).normalized()
+        _dd = _seg_head_dist(_d)
+        if _best is None or _dd > _best[0]:
+            _best = (_dd, _d, _sg)
+    _dist_head, blade_w, _sg_used = _best
+    p(f"    剑身离头球 {_dist_head:.2f} 格（倒向 {'+' if _sg_used > 0 else '-'}）")
     normal_w = (-_to_cam).normalized()
     R = basis_from(blade_w, normal_w).to_4x4()
     p(f"    刃向（视图系） {tuple(round(v,2) for v in blade_w.normalized())}"
