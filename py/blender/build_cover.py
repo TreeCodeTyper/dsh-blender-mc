@@ -703,6 +703,8 @@ def _rot3(s, default):
 
 
 ARM_POSE = os.environ.get('DSH_ARM_POSE', '1').lower() not in ('0', 'off', 'false')
+# 肩膀往外侧张开 + 抬手到肩高（Z 42 → 62）。肘部原来 -85° 会把小臂折到胸前，
+# 手正好挡在脸下方，剑看起来像从胸口插出来 —— 改成 -52°。
 SHOULDER_ROT = _rot3(os.environ.get('DSH_ARM_SHOULDER'), (-40.0, 0.0, 42.0))
 ELBOW_ROT = _rot3(os.environ.get('DSH_ARM_ELBOW'), (-85.0, 0.0, 0.0))
 WRIST_ROT = _rot3(os.environ.get('DSH_ARM_WRIST'), (0.0, 0.0, 6.0))
@@ -775,15 +777,9 @@ if arm and any(b.name == 'Hand.R' for b in arm.data.bones):
     # 现在手臂已经抬起来（[4.8]），手在肩高、离头 0.4 格左右，
     # 只要保持"竖直 + 一点点外倾"就不会糊脸。
     #
-    # ★ 坑 73/74（verify8/9/10 连踩三张）：这两个方向必须在【角色局部系】里给，
-    #   不能当成世界方向。角色转向靠 arm.rotation_euler=YAW，朝向搜索会把 yaw
-    #   改到 300° 这种大角度；剑要是写死世界方向，就会横过来从脸前面劈过去。
-    #   局部系约定（BPS V4 静止朝 −Y）：+X = 角色右手侧，+Z = 上，−Y = 正面。
-    #   剑=「竖直偏右手侧 40°、刃面朝镜头」→ 剑尖一定落在头的外侧，不糊脸。
-    _yaw_rot = mathutils.Matrix.Rotation(math.radians(YAW), 3, 'Z')
-    blade_w = _yaw_rot @ mathutils.Vector((0.92, -0.10, 1.0))
-    normal_w = _yaw_rot @ mathutils.Vector((0.00, -1.0, 0.0))
-    R = basis_from(blade_w, normal_w).to_4x4()
+    # 刃向旧做法（角色局部系）已废弃：手抬到肩高后拳头离头只有 0.3 格，
+    # 局部 +X 在某些机位下正好指向头部，剑会从脸中间劈过去。
+    # 新做法见下面（拿到抓握点之后再算，见「坑 76」）。
 
     # ★ 坑 55 + 坑 71 的修正：
     #   抓握点必须用【摆好姿势之后】的 Hand.R 骨（pose bone），
@@ -792,12 +788,64 @@ if arm and any(b.name == 'Hand.R' for b in arm.data.bones):
     pb = arm.pose.bones['Hand.R']
     head_w = arm.matrix_world @ pb.head
     tail_w = arm.matrix_world @ pb.tail
-    grip = (head_w + tail_w) / 2.0
+    _bone_mid = (head_w + tail_w) / 2.0
+    # ★ 坑 75：Hand.R 的骨中点并不在拳头几何里（BPS 的手骨偏腕侧），
+    #   直接把柄对上骨中点，剑看起来像「插在手腕/小臂上」。
+    #   正确做法：取骨架形变之后、真实拳头网格里离手骨最近的顶点群的中心。
+    def _fist_center(mid, radius=0.30, min_n=8):
+        dg = bpy.context.evaluated_depsgraph_get()
+        best = None
+        best_n = 0
+        for ob in bpy.data.objects:
+            if ob.type != 'MESH' or ob.parent is None or ob.parent.name != arm.name:
+                continue
+            nm = ob.name.lower()
+            if ('hand' not in nm) and ('arm' not in nm):
+                continue
+            try:
+                ev = ob.evaluated_get(dg)
+                me = ev.to_mesh()
+            except Exception:
+                continue
+            acc = mathutils.Vector((0.0, 0.0, 0.0))
+            n = 0
+            for v in me.vertices:
+                w = ev.matrix_world @ v.co
+                if (w - mid).length <= radius:
+                    acc += w
+                    n += 1
+            ev.to_mesh_clear()
+            if n >= min_n and n > best_n:
+                best = acc / float(n)
+                best_n = n
+        return best
+    _fist = _fist_center(_bone_mid)
+    grip = _fist if _fist is not None else _bone_mid
+    p(f"    拳头几何中心 {tuple(round(v,2) for v in grip)}"
+      f"{'' if _fist is not None else '  （没找到手部网格，退回骨中点）'}")
     p(f"    Hand.R 头 {tuple(round(v,2) for v in head_w)} "
       f"尾 {tuple(round(v,2) for v in tail_w)}")
     p(f"    抓握点（手骨中点） {tuple(round(v,2) for v in grip)}  "
       f"剑柄下沉 {SINK}（本地）≈ {SINK * K:.2f} 方块")
     hand_pos = grip
+
+    # ★ 坑 76：刃向用【视图系】。手抬到肩高后拳头离头只有 0.3 格，
+    #   局部 +X 在某些机位下正好是「朝头的方向」，剑就从脸中间劈过去。
+    #   这里用 CAM_AZ 现推和 [8] 同一套相机基向量（fw 要到 [8] 才算），
+    #   让刃向上、朝「手所在的那一侧」倒 —— 任何机位都从脸旁边出去。
+    _az_sw = math.radians(CAM_AZ)
+    _to_cam = mathutils.Vector((-math.cos(_az_sw), math.sin(_az_sw), 0.0)).normalized()
+    _lat = mathutils.Vector((_to_cam.y, -_to_cam.x, 0.0)).normalized()  # 画面横向
+    _v = mathutils.Vector((hand_pos.x - WX, hand_pos.y - WY, 0.0))
+    if _v.length > 1e-6 and _lat.dot(_v) < 0.0:
+        _lat = -_lat                      # 往手那一侧倒，别横穿身体
+    blade_w = (mathutils.Vector((0.0, 0.0, -1.0))
+               + _lat * 0.45
+               - _to_cam * 0.08)
+    normal_w = (-_to_cam).normalized()
+    R = basis_from(blade_w, normal_w).to_4x4()
+    p(f"    刃向（视图系） {tuple(round(v,2) for v in blade_w.normalized())}"
+      f"  画面横向 {tuple(round(v,2) for v in _lat)}")
 
     M = (mathutils.Matrix.Translation(hand_pos)
          @ R
