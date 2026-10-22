@@ -95,7 +95,10 @@ def now_ms():
 def default_root(env=None):
     env = env or os.environ
     home = env.get('DSH_HOME') or os.path.join(os.path.expanduser('~'), '.dsh')
-    return os.path.join(home, 'blender-mc', 'maps')
+    # 库根目录：<DSH_HOME>/blender-mc
+    # 每个存档落在这里的 maps/<id>/world（ensure_dirs/_map_dir 会再拼 'maps'），
+    # 所以这里不能再带 /maps，否则会出现 maps/maps/<id> 双层目录（0.3.1 及以前）。
+    return os.path.join(home, 'blender-mc')
 
 
 def ensure_dirs(root):
@@ -105,7 +108,9 @@ def ensure_dirs(root):
 
 def _read_json(path, default):
     try:
-        with open(path, 'r', encoding='utf-8') as f:
+        # utf-8-sig：PowerShell 5.1 的 `Set-Content -Encoding utf8` 会写 BOM，
+        # 带 BOM 的 job 文件用 utf-8 解析会抛异常，表现为「缺少 --zip」这种莫名错误。
+        with open(path, 'r', encoding='utf-8-sig') as f:
             return json.load(f)
     except FileNotFoundError:
         return default
@@ -329,13 +334,46 @@ def _region_stats(save_dir):
         return 0, None, []
     if not xs:
         return 0, None, []
+    # 按「主簇」算范围，而不是 min/max。
+    # 整合包/联机存档里经常残留一撮几百万格外的前世探索残片（实测
+    # 「方可梦世界」有 region\r.25931.-58593.mca 这样一整簇），直接用 min/max
+    # 会算出 1300 万 × 3000 万格这种荒唐的「世界范围」，卡片上没法看，
+    # 没有出生点时推荐机位也会被带到空白区。
+    pairs = list(zip(xs, zs))
+    bounds, outliers = _cluster_bounds(pairs)
+    if outliers:
+        bounds['outliers'] = outliers
+    return n, bounds, pairs
+
+
+def _cluster_bounds(pairs, gap=8):
+    """把 region 坐标按「相距 <= gap 个 region」聚成簇，取最大簇的包围盒。
+
+    返回 (bounds, 被丢掉的 region 数)。gap=8 个 region = 4096 格，
+    正常连续探索的世界不会被切开，几千格之外的孤岛残片会被丢掉。
+    """
+    pts = sorted(pairs)
+    clusters = []
+    cur = [pts[0]]
+    for p in pts[1:]:
+        near = any(abs(p[0] - q[0]) <= gap and abs(p[1] - q[1]) <= gap for q in cur[-64:])
+        if near:
+            cur.append(p)
+        else:
+            clusters.append(cur)
+            cur = [p]
+    clusters.append(cur)
+    best = max(clusters, key=len)
+    bx = [p[0] for p in best]
+    bz = [p[1] for p in best]
     bounds = {
-        'xMin': min(xs) * 512,
-        'xMax': (max(xs) + 1) * 512 - 1,
-        'zMin': min(zs) * 512,
-        'zMax': (max(zs) + 1) * 512 - 1,
+        'xMin': min(bx) * 512,
+        'xMax': (max(bx) + 1) * 512 - 1,
+        'zMin': min(bz) * 512,
+        'zMax': (max(bz) + 1) * 512 - 1,
     }
-    return n, bounds, list(zip(xs, zs))
+    dropped = len(pts) - len(best)
+    return bounds, dropped
 
 
 def _score_save(path, rel):
@@ -512,11 +550,29 @@ def get_map(map_id, root=None):
 
 def resolve_world(map_id, root=None):
     """map id → 存档目录绝对路径（给 mc_shoot/mc_scan 用）。"""
+    root = root or default_root()
     meta = get_map(map_id, root=root)
     p = meta.get('savePath')
     if not p or not os.path.isdir(p):
-        raise MapError('map.missing-world', '地图记录还在，但存档目录不见了：%s' % (p or '?'),
-                       status=409)
+        # 自愈：记录里的绝对路径失效（库目录搬过家、或 0.3.1 的 maps/maps 双层）
+        # 时，按「库根 + maps/<id>/<worldRel>」重算一次，能对上就用它并回写。
+        fallback = os.path.join(_map_dir(root, map_id), meta.get('worldRel') or 'world')
+        if os.path.isdir(fallback):
+            p = fallback
+            try:
+                raw = _read_json(os.path.join(_map_dir(root, map_id), 'meta.json'), None)
+                if isinstance(raw, dict):
+                    raw['savePath'] = p
+                    _write_json(os.path.join(_map_dir(root, map_id), 'meta.json'), raw)
+                idx = read_index(root)
+                if map_id in idx['maps']:
+                    idx['maps'][map_id]['savePath'] = p
+                    _write_json(index_path(root), idx)
+            except Exception:
+                pass
+        else:
+            raise MapError('map.missing-world', '地图记录还在，但存档目录不见了：%s' % (p or '?'),
+                           status=409)
     return p, meta
 
 
@@ -634,8 +690,15 @@ def import_zip(zip_path, name=None, root=None, sha256=None, source_filename=None
         spawn = level.get('spawn')
         if spawn and bounds and not (bounds['xMin'] <= spawn['x'] <= bounds['xMax']
                                      and bounds['zMin'] <= spawn['z'] <= bounds['zMax']):
-            warnings.append('出生点在世界范围外，已按包围盒中心推荐机位区域')
-            spawn = None
+            # 出生点落进了被分位数裁掉的那一小撮 region 里（存档真正在玩的那块
+            # 偏在一角）→ 把范围扩到包含出生点，而不是丢掉出生点。
+            warnings.append('出生点超出主簇范围，已把世界范围扩展到包含出生点')
+            bounds = {
+                'xMin': min(bounds['xMin'], spawn['x'] - 256),
+                'xMax': max(bounds['xMax'], spawn['x'] + 256),
+                'zMin': min(bounds['zMin'], spawn['z'] - 256),
+                'zMax': max(bounds['zMax'], spawn['z'] + 256),
+            }
         area = suggest_area(bounds, spawn)
         if not area:
             raise MapError('save.no-region', '算不出世界范围，无法推荐机位')

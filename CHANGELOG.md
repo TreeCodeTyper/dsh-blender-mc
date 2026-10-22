@@ -9,11 +9,59 @@
 ## [Unreleased]
 
 ### 计划中
+
 - 英文本地化（`README.en.md`）
 - 更多动画预设（现在只有"杀戮光环"）
 - 景深 / 相机运镜（用空物体对焦 + 推轨）
 - 更多审图判据："主体是否被前景遮挡"
 - MiBlend 接入（MCprep 的替代方案）
+
+---
+
+## [0.3.3] - 2026-10-22
+
+拿到你上传的真实整合包存档（方可梦世界，428 个 region）后复测暴露的问题。
+
+### 修复
+- **找不到机位**：`py/scan.py` 的地表判定把树冠/植物/水面也算成「最高方块」，
+  森林和装饰密集的地图整片地表都是 `oak_leaves`，「15×15 同高度草地」一个都不满足，
+  `mc_scan` 返回 0 个机位、`mc_shoot` 直接失败。现在跳过 `DECOR`（叶子/水/草/花/雪片…）。
+- **仍然找不到时不再直接放弃**：`pick_from_save` 会逐级放宽（15×15 → 7×7 → 4×4 → 2×2，
+  草地要求也放宽到任意可站方块），最后兜底用「5×5 内至少 9 格同高度」+ 开阔度挑落点，
+  日志会写明放宽到了哪一级。你那张地图实测：15×15 一个都没有 → 4×4 找到 3 个。
+
+### 验证
+- `mc_scan({ map: "方可梦世界" })` → 3 个机位；按推荐机位出图 960×540，审图 WARN 78
+  （朝向/构图/接地/曝光全部通过，只剩「背光方向的天空没有高光」）。
+
+---
+
+## [0.3.2] - 2026-10-22
+
+「设置 → 背景地图」在 0.3.1 里其实**一个请求都没进来过**，这版把它修通了。
+
+### 修复
+- **上传入口整条路由没挂上**：`lib/index.js` 把外层 `ctx` 传给了 `registerMapRoutes`，
+  在它上面读 `ctx.webServer` 会抛 `cannot get property "webServer" without inject`，
+  被 try/catch 吞成一条 warn。改为用 `ctx.inject(['webServer'], scope => mountMapRoutes(scope))`
+  的**注入作用域**注册。现在 `GET /api/blender-mc/maps` 会正常返回列表（此前是宿主兜底的 401）。
+- **地图库多套了一层 `maps/maps/`**：`default_root()` 与前端 `defaultMapsDir()` 都返回
+  `<DSH_HOME>/blender-mc/maps`，而布局本身还要拼 `maps/<id>`。统一成库根
+  `<DSH_HOME>/blender-mc`（存档在 `maps/<id>/world`），并给 `resolve_world` 加了
+  路径失效自愈（记录里的绝对路径对不上就按库根重算并回写）。
+- **大存档被前端挡在门外**：`lib/client.js` 的 `DEFAULT_MAX_UPLOAD` 兜底写的是 200 MB，
+  而宿主默认 2048 MB。列表请求一旦没拿到 `limits`，989 MB 的整合包会被判「超过上限」
+  且**不发请求**，看起来像插件没反应。兜底改成 2048 MiB。
+- **「世界范围」算成 1300 万格**：`_region_stats()` 用 min/max，整合包残留的离群
+  region（`r.25931.-58593.mca` 这种）会把包围盒撑爆。改为按「相距 ≤8 个 region 的
+  主簇」取包围盒，并把被丢掉的 region 数记在 `bounds.outliers`；出生点落在主簇外时
+  扩展范围而不是丢掉出生点。
+- **带 BOM 的 job 文件解析失败**：`_read_json()` 改 `utf-8-sig`（PowerShell 5.1
+  `Set-Content -Encoding utf8` 会写 BOM），此前会误报 `map.no-file 缺少 --zip`。
+
+### 升级注意
+- 0.3.1 之前入的库如果出现 `maps/maps/<id>`，可用 `python py/cli.py map doctor` 查看，
+  或直接按上面的布局手动把内层 `maps/*` 上移一层；`resolve_world` 也会自愈路径。
 
 ---
 

@@ -23,7 +23,22 @@ STANDABLE = ('grass_block', 'dirt', 'coarse_dirt', 'podzol', 'mycelium',
              'granite', 'deepslate', 'tuff', 'calcite', 'snow_block',
              'moss_block', 'rooted_dirt', 'mud', 'clay', 'terracotta',
              'smooth_basalt', 'blackstone', 'basalt', 'netherrack',
-             'end_stone', 'sandstone')
+             'end_stone', 'sandstone', 'planks', 'log', 'cobblestone',
+             'bricks', 'concrete', 'polished')
+
+# ★ 这些不算「地表」：树冠 / 植物 / 水面 / 薄雪。它们盖在真正能站的地面上面，
+#   如果把它们算进「最高方块」，整片森林的地表都会被判成 oak_leaves，
+#   于是「15×15 同高度草地」一个都找不到 —— 整合包地图（树多、装饰多）上必现。
+DECOR = ('_leaves', 'water', 'lava', 'seagrass', 'kelp', 'vine', 'carpet',
+         'torch', 'flower', 'sapling', 'bush', 'crop', 'wheat', 'bamboo',
+         'sugar_cane', 'snow_layer', 'short_grass', 'tall_grass', 'fern',
+         'dead_bush', 'mushroom', 'lily_pad', 'cobweb', 'roots', 'azalea')
+
+
+def _is_decor(name):
+    if name in ('short_grass', 'tall_grass', 'fern', 'dead_bush', 'sugar_cane'):
+        return True
+    return any(name.endswith(s) for s in DECOR)
 
 
 def surface_map(world, x0, x1, z0, z1, y0=50, y1=200, progress=None):
@@ -31,6 +46,8 @@ def surface_map(world, x0, x1, z0, z1, y0=50, y1=200, progress=None):
     top = {}
     n = 0
     for (x, y, z, name) in world.iter_blocks(x0=x0, x1=x1, z0=z0, z1=z1, y0=y0, y1=y1):
+        if _is_decor(name):
+            continue
         k = (x, z)
         if k not in top or y > top[k][0]:
             top[k] = (y, name)
@@ -145,9 +162,51 @@ def best_shots(top, bounds=None, radius=15, want_grass=True,
     return out
 
 
+def rough_shots(top, bounds=None, az_step=30, top_n=6, progress=None):
+    """最后兜底：只要求「这一列能站人」，按周围 5×5 同高度格数排序。
+
+    ★ 为什么需要它：整合包地图（山地、城堡、密集装饰）上常常一整张图都
+      找不到 15×15 的平整草地，于是 mc_scan 返回 0 个机位、mc_shoot 直接失败。
+      用户上传的是「他想拍的地图」，不是「适合拍的平地」—— 必须给个能拍的落点。
+    """
+    cols = {}
+    for (x, z), (y, name) in top.items():
+        if any(name.endswith(s) for s in STANDABLE):
+            cols[(x, z)] = y
+    if not cols:
+        return []
+    bx0, bx1, bz0, bz1 = bounds if bounds else (None, None, None, None)
+    scored = []
+    for (x, z), y in cols.items():
+        if bounds and not (bx0 <= x <= bx1 and bz0 <= z <= bz1):
+            continue
+        cnt = 0
+        for dx in range(-2, 3):
+            for dz in range(-2, 3):
+                v = cols.get((x + dx, z + dz))
+                if v is not None and abs(v - y) <= 1:
+                    cnt += 1
+        if cnt >= 9:
+            scored.append((cnt, x, z, y))
+    scored.sort(reverse=True)
+    if progress:
+        progress(f'    兜底候选 {len(scored)} 列（要求 5×5 内至少 9 格同高度）')
+    out = []
+    for cnt, x, z, y in scored[:max(1, top_n) * 6]:
+        for az in range(0, 360, az_step):
+            o = openness(top, x, z, az, y, bounds=bounds)
+            if o >= 0.30:
+                out.append({'x': x, 'z': z, 'y': y, 'az': az,
+                            'openness': round(o, 3), 'flat': cnt})
+        if len(out) >= top_n:
+            break
+    out.sort(key=lambda s: (-s['openness'], -s['flat']))
+    return out[:top_n]
+
+
 def pick_from_save(save_dir, x0, x1, z0, z1, y0=50, y1=200,
                    radius=15, az_step=30, top_n=12, progress=None):
-    """一站式：读存档 → 地表 → 推荐机位"""
+    """一站式：读存档 → 地表 → 推荐机位（找不到就逐级放宽，最后兜底）"""
     w = World(save_dir)
     if progress:
         progress(f'    读存档 {save_dir}')
@@ -158,6 +217,19 @@ def pick_from_save(save_dir, x0, x1, z0, z1, y0=50, y1=200,
     bounds = (x0, x1, z0, z1)
     shots = best_shots(top, bounds=bounds, radius=radius, az_step=az_step,
                        top_n=top_n)
+    if not shots:
+        for r, min_open in ((max(6, radius // 2), 0.55), (4, 0.35), (2, 0.20)):
+            shots = best_shots(top, bounds=bounds, radius=r, want_grass=False,
+                               az_step=az_step, top_n=top_n, min_open=min_open)
+            if shots:
+                if progress:
+                    progress(f'    没有 {radius}×{radius} 平整草地，放宽到 {r}×{r} 后找到 {len(shots)} 个机位')
+                break
+    if not shots:
+        if progress:
+            progress('    仍然没有成片平地，改用「能站人」兜底挑选')
+        shots = rough_shots(top, bounds=bounds, az_step=az_step, top_n=top_n,
+                            progress=progress)
     return w, top, shots
 
 
