@@ -197,10 +197,18 @@ if ($SkipPublish) {
         $pubArgs += "--otp=$Otp"
         Info "带一次性验证码发布（--otp=$Otp）"
     }
+    # ⚠️ npm 会往 stderr 写一堆 "npm notice ..."，而本脚本开头设了
+    #    $ErrorActionPreference = 'Stop' —— 直接用 2>&1 收输出会被当成
+    #    异常抛出，结果「其实已经发布成功，脚本却报失败退出 1」。
+    #    这里临时放宽，只用退出码判成败。
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     $out = & npm @pubArgs 2>&1 | Out-String
+    $pubCode = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
     $out.Trim() | ForEach-Object { Info $_ }
 
-    if ($LASTEXITCODE -ne 0) {
+    if ($pubCode -ne 0) {
         Fail "发布失败"
 
         # ⚠️ 坑 68：npm 账号开了 2FA 时，Classic Token 里的 "Publish" 类型
