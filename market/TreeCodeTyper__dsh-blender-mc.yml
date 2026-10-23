@@ -1,7 +1,7 @@
-﻿url: https://github.com/TreeCodeTyper/dsh-blender-mc
+url: https://github.com/TreeCodeTyper/dsh-blender-mc
 name: TreeCodeTyper/dsh-blender-mc
 category: tools
 description:
-  en: 'Turns a Minecraft Java save into a Blender cover or a 10-second animation: picks the camera spot, exports the terrain, sets up lighting and materials, renders, then reviews the frame with OpenCV and re-renders until it passes. Upload maps and skins from the DSH settings page. Requires Blender 4.2 LTS and Python 3.10+.'
-  zh: '把 Minecraft 存档变成 Blender 封面或 10 秒动画：自动挑机位、导出地形、布光配材质、渲染，再用 OpenCV 审图，不合格自动调参重渲。地图和人物皮肤都能在 DSH 设置页直接上传。需 Blender 4.2 LTS 与 Python 3.10+。'
+  en: 'Turns a Minecraft Java save into a Blender cover or animation: scans the .mca region files for flat open ground, exports the terrain to OBJ, and drives Blender headless with MCprep materials, the BPS character rig and three-point lighting. After each render it reviews the frame with OpenCV for facing, ground contact, exposure, lighting and composition, then re-renders with adjusted parameters when a check fails. Requires Blender 4.2 LTS or newer and Python 3.10+ with opencv-python and numpy; the first run assembles the Minecraft assets with the bundled setup command.'
+  zh: '把 Minecraft Java 存档变成 Blender 封面或动画：在 .mca 区域文件里找大片平地，导出地形为 OBJ，无头驱动 Blender（MCprep 材质、BPS 角色骨架、三点布光）。每次渲染后用 OpenCV 检查朝向、接地、曝光、布光和构图，不合格就调整参数重渲。需 Blender 4.2 LTS 以上、Python 3.10+（opencv-python、numpy），首次使用运行 setup 装配 Minecraft 素材。'
 icon: https://raw.githubusercontent.com/TreeCodeTyper/dsh-blender-mc/main/assets/icon-180.png
