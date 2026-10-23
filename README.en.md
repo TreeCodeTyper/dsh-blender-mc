@@ -18,6 +18,48 @@ English · [中文](README.md)
 
 ---
 
+## Result first
+
+<img src="assets/cover-skin.jpg" alt="cover" width="100%">
+
+> The map is a save the player uploaded from **Settings → Background maps**;
+> the skin is a 64×64 PNG the player uploaded. Camera, lighting, materials and the
+> post-render self-check are all automatic.
+
+### 0.2.1 → 0.3.1
+
+| Before | After |
+|---|---|
+| <img src="assets/before-0.2.1.jpg" width="430"> | <img src="assets/after-0.3.1.jpg" width="430"> |
+| Flat light, no shadow, sword through the chest | AgX + golden hour + contact shadow + DoF, 3/4 profile |
+
+### 10-second animation
+
+<img src="assets/screenshot-3-anim.jpg" alt="animation" width="100%">
+
+## What it does
+
+```
+save .mca  →  find a camera spot  →  export geometry  →  build the Blender scene
+           →  render  →  ★ OpenCV review  →  auto-tune and re-render  →  image / clip
+```
+
+No Blender skills, no Mineways, no manual camera / light / material work.
+
+## 30-second start
+
+```bash
+# 1) install (or search dsh-blender-mc in the DSH plugin market)
+dsh plugin --profile desktop add dsh-blender-mc
+
+# 2) check the environment and assemble Minecraft assets
+mc_doctor
+mc_setup
+
+# 3) render (the save zip was already uploaded in Settings → Background maps)
+mc_shoot { "map": "Dream World", "out": "E:/out" }
+```
+
 ## What it does
 
 A **DSH plugin** (also usable as a plain CLI).

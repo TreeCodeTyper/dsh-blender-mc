@@ -18,45 +18,61 @@
 
 ---
 
-## 这是什么
+## 先看结果
 
-一个 **DSH 插件**（也可以脱离 DSH 当命令行工具用）。
+<img src="assets/cover-skin.jpg" alt="封面" width="100%">
 
-给它一个 Minecraft 存档目录，它就能：
+> 地图是玩家自己在 **设置 → 背景地图** 里拖进去的存档 zip，皮肤也是自己传的 64×64 PNG。
+> 机位、布光、材质、渲完的自动审图全部自动。
+
+### 0.2.1 → 0.3.1
+
+| 之前 | 现在 |
+|---|---|
+| <img src="assets/before-0.2.1.jpg" width="430"> | <img src="assets/after-0.3.1.jpg" width="430"> |
+| 平光、无投影、剑穿过胸口 | AgX + 黄金时刻 + 接触阴影 + 景深，3/4 侧脸持剑 |
+
+### 10 秒动画
+
+<img src="assets/screenshot-3-anim.jpg" alt="动画" width="100%">
+
+## 它做了什么
 
 ```
-存档 .mca  →  自动找好看的机位  →  导出几何  →  调 Blender 搭场景
-           →  渲染  →  ★ OpenCV 自动审图  →  不合格自动调参重渲  →  出图 / 出片
+存档 .mca  →  自动找机位  →  导出几何  →  Blender 搭场景（MCprep 材质 + BPS 骨架 + 三点布光）
+           →  渲染  →  ★ OpenCV 审图  →  不合格自动调参重渲  →  出图 / 出片
 ```
 
 你**不用**会 Blender，**不用**会 Mineways，**不用**手动摆相机、调灯光、配材质。
 
-### 出来的封面
+## 30 秒上手
 
-真实存档草原 + 海平线，角色 3/4 侧脸持钻石剑。机位、布光、材质全自动。
+```bash
+# ① 装（或在 DSH 插件市场里搜 dsh-blender-mc）
+dsh plugin --profile desktop add dsh-blender-mc
 
-![封面](assets/screenshot-1-cover.jpg)
+# ② 体检 + 装配 Minecraft 素材（MCprep / BPS 骨架 / 物品库 / ffmpeg）
+mc_doctor
+mc_setup
 
-### 渲完自己审图
+# ③ 出图（存档 zip 已经在「设置 → 背景地图」里传过）
+mc_shoot { "map": "方可梦世界", "out": "E:/出图" }
+```
 
-每张图渲完都会用 OpenCV 检查 **朝向 / 接地 / 曝光 / 布光 / 构图**，
-左上角是结论分数，绿框是识别到的角色位置。不合格会**自动调参重渲**。
+**传地图**：设置 → 背景地图 → 把存档或整合包压成的 `.zip` 拖进去，自动解压识别，
+之后 `mc_shoot({ "map": "名字" })` 就能点名出图（`map` 会自动补存档路径和搜索范围）。
 
-![审图](assets/screenshot-2-review.jpg)
+<details>
+<summary>没有 DSH？也能当纯命令行工具用</summary>
 
-### 10 秒动画
+```bash
+pip install opencv-python numpy
+python py/cli.py doctor
+python py/cli.py setup
+python py/cli.py shoot "D:/saves/新的世界" --area -2050,-1940,-1230,-980 --out ./out
+```
 
-挥剑两刀 + 环绕的发光能量环 + 斩击弧光。
-
-![动画](assets/screenshot-3-anim.jpg)
-
-### 想换地图？在 DSH 里直接传（0.3.0 新增）
-
-不用再去文件夹里翻存档路径：**设置 → 背景地图**，把整合包的存档 `.zip` 拖进去，
-自动解压、自动找出里面的存档、自动读版本和坐标范围、自动生成缩略图。
-之后出封面直接说地图名字就行：
-
-> 用「方可梦世界」出一张封面
+</details>
 
 ---
 
