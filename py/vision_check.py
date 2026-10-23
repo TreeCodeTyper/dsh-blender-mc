@@ -529,7 +529,11 @@ def _subject_pixels(img, box):
 
 def check_image(path, subject_box=None, verbose=False):
     """主入口：返回 {verdict, score, issues, details}"""
-    img = imread_u(path)
+    try:
+        img = imread_u(path)
+    except (FileNotFoundError, ValueError) as e:
+        # 传进来的不是图片（或文件不在了）属于用户输入问题，不该甩 traceback
+        return {'ok': False, 'error': str(e)}
     if img is None:
         return {'ok': False, 'error': f'读不到图: {path}'}
     H, W = img.shape[:2]

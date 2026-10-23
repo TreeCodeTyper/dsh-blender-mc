@@ -658,6 +658,11 @@ def import_zip(zip_path, name=None, root=None, sha256=None, source_filename=None
                        % (size / 1024.0 ** 3, limits['max_zip_bytes'] / 1024.0 ** 3),
                        status=413)
 
+    if not zipfile.is_zipfile(zip_path):
+        raise MapError('zip.unreadable',
+                       '这个文件不是 zip（可能上传中断或文件本身损坏）：%s' % os.path.basename(zip_path),
+                       status=415)
+
     sha = _norm_sha(sha256) or _sha256_file(zip_path)
     map_id = 'm_' + sha[:12]
     idx = read_index(root)
@@ -790,7 +795,9 @@ def doctor(root=None):
 def _emit(obj, as_json):
     if as_json:
         print(json.dumps(obj, ensure_ascii=False))
-        return 0
+        # ⚠️ 这里以前无条件 return 0，导致「上传失败」在 --json 模式下退出码是 0，
+        #    上层 lib/map-routes.js 只能靠最后一行 JSON 猜成功与否，失败会被误判。
+        return 0 if obj.get('ok') else 1
     if obj.get('ok'):
         data = obj.get('data')
         if isinstance(data, dict) and 'maps' in data:

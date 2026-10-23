@@ -8,6 +8,24 @@
 
 ## [Unreleased]
 
+### 修复（插件自身 bug 排查，只动输入校验与错误出口）
+
+- **`map import --json` 失败时退出码是 0**：`maplib._emit()` 的 JSON 分支无条件 `return 0`，
+  上传校验失败也能「成功」返回 → 现在按 `ok` 返回 0/1，`lib/map-routes.js` 不再把失败当成功。
+- **坏 zip 要等建完临时目录才炸**：`import_zip()` 在解压前先 `zipfile.is_zipfile()`，
+  不合法直接回 `zip.unreadable`（HTTP 415），不碰磁盘。
+- **`--center a,b` / `--y x,y` 甩 `ValueError` traceback**：改成 argparse 类型校验，提示
+  「要写成 两个整数，用逗号分隔，例如 100,-40」。
+- **`--res abc`**：现在校验「宽x高」且 16~7680 / 16~4320，不再一路传到渲染才失败。
+- **`--samples 0` / `--attempts 0`**：原先静默渲出废图，现在要求 ≥1。
+- **`scan` / `shoot` 指向不存在的存档**：预先检查目录与 `region/`，给出「存档目录不存在 /
+  这个目录里没有 region/」而不是 `FileNotFoundError` traceback。
+- **`anim` 指向不存在的 .blend**：先判存在，提示「先把封面渲出来（shoot）」。
+- **`check` 传了非图片文件**：`check_image()` 捕获读图异常返回 `{ok:false,error}`，
+  `cmd_check` 打印 `❌ 不是可识别的图像` 并以 1 退出，不再抛 `ValueError`。
+- **`--area` 起止写反**（如 `40,0,40,0`）：自动交换并提示，不再静默得到 0 个机位。
+
+
 ### 背景世界（从动画素材里反查出来的三个问题）
 
 - **人物动作**：新增姿势预设 DSH_POSE=hero|guard|raise|legacy（默认 hero：躯干朝镜头拧 12°、头再补 8°、左臂配平、右手在体侧举剑）；刃向改成**按「头球距离」自动选倒向**，不会再从脸中间劈过去。

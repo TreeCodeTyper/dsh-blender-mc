@@ -28,10 +28,70 @@ sys.path.insert(0, os.path.join(HERE, 'blender'))
 
 
 def _area(s):
-    v = [int(x) for x in s.split(',')]
+    try:
+        v = [int(x) for x in s.split(',')]
+    except ValueError:
+        raise argparse.ArgumentTypeError('area 要是 4 个整数: x0,x1,z0,z1（收到 %r）' % s)
     if len(v) != 4:
         raise argparse.ArgumentTypeError('area 要 4 个数: x0,x1,z0,z1')
-    return tuple(v)
+    x0, x1, z0, z1 = v
+    if x0 > x1 or z0 > z1:
+        # 反着写是最常见的输入错误：以前会静默返回 0 个机位，让人以为地图有问题
+        x0, x1 = min(x0, x1), max(x0, x1)
+        z0, z1 = min(z0, z1), max(z0, z1)
+        print('（area 的起止写反了，已自动按 %d,%d,%d,%d 处理）' % (x0, x1, z0, z1))
+    return (x0, x1, z0, z1)
+
+
+def _res(s):
+    """尺寸必须是 WxH，且不能是 0/负数 —— 以前写 'abc' 会一路传到渲染才失败。"""
+    t = str(s).lower().replace('*', 'x').replace('×', 'x').strip()
+    if 'x' not in t:
+        raise argparse.ArgumentTypeError('尺寸要写成 宽x高，例如 1920x1080（收到 %r）' % s)
+    a, b = t.split('x', 1)
+    try:
+        w, h = int(a), int(b)
+    except ValueError:
+        raise argparse.ArgumentTypeError('尺寸要写成 宽x高，例如 1920x1080（收到 %r）' % s)
+    if w < 16 or h < 16:
+        raise argparse.ArgumentTypeError('尺寸太小: %dx%d（最小 16x16）' % (w, h))
+    if w > 7680 or h > 4320:
+        raise argparse.ArgumentTypeError('尺寸太大: %dx%d（上限 7680x4320）' % (w, h))
+    return '%dx%d' % (w, h)
+
+
+def _pair_int(s):
+    """x,z / y0,y1 这种两个整数：以前直接 int() 会甩 ValueError traceback。"""
+    try:
+        a, b = [int(x) for x in str(s).split(',')]
+    except ValueError:
+        raise argparse.ArgumentTypeError('要写成 两个整数，用逗号分隔，例如 100,-40（收到 %r）' % s)
+    return (a, b)
+
+
+def _posint(s):
+    """正整数：--samples 0 / --attempts 0 以前会被静默接受，渲出来是废图。"""
+    try:
+        v = int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError('要是整数（收到 %r）' % s)
+    if v < 1:
+        raise argparse.ArgumentTypeError('必须 ≥ 1（收到 %d）' % v)
+    return v
+
+
+def _need_save(save):
+    """存档目录先查一遍，别等 anvil 抛 FileNotFoundError 把 traceback 甩给用户。"""
+    if not os.path.isdir(save):
+        print('❌ 存档目录不存在: %s' % save)
+        print('   上传过的地图可以先用: python py/cli.py map list')
+        print('   或指定: python py/cli.py map resolve --id <id> --json')
+        return False
+    if not os.path.isdir(os.path.join(save, 'region')):
+        print('❌ 这个目录里没有 region/，不像是存档根目录: %s' % save)
+        print('   要选到含 level.dat 和 region/ 的那一层（整合包 zip 里常多套一层文件夹）')
+        return False
+    return True
 
 
 def cmd_setup(a):
@@ -40,7 +100,7 @@ def cmd_setup(a):
     srcs = a.sources
     if not srcs:
         srcs = default_sources()
-        print(f'（没给资源目录，默认扫这些:）')
+        print('（没给资源目录，默认扫这些:）')
         for s in srcs:
             print(f'    {s}')
     if not srcs:
@@ -81,7 +141,9 @@ def cmd_extract(a):
 
 def cmd_scan(a):
     from pipeline import step_scan
-    y = tuple(int(v) for v in str(a.y).split(','))
+    if not _need_save(a.save):
+        return 1
+    y = a.y
     shots = step_scan(a.save, a.area, y=y, radius=a.radius,
                       top_n=a.top, progress=print)
     print(f'\n推荐机位 {len(shots)} 个（开阔度 / 坐标 / 地面Y / 方位角 / 平坦格数）:')
@@ -98,6 +160,8 @@ def cmd_scan(a):
 
 def cmd_shoot(a):
     from pipeline import shoot
+    if not _need_save(a.save):
+        return 1
     params = {}
     if a.yaw is not None:
         params['yaw'] = a.yaw
@@ -115,7 +179,7 @@ def cmd_shoot(a):
         params['res'] = a.res
     if a.samples:
         params['samples'] = a.samples
-    center = tuple(int(v) for v in a.center.split(',')) if a.center else None
+    center = a.center
     r = shoot(a.save, a.area, a.out, blender=a.blender, params=params,
               center=center, radius=a.radius, max_attempts=a.attempts,
               target_score=a.target, progress=print)
@@ -132,6 +196,10 @@ def cmd_shoot(a):
 
 def cmd_anim(a):
     from pipeline import animate, find_blender
+    if not os.path.isfile(a.blend):
+        print('❌ 找不到 .blend 工程: %s' % a.blend)
+        print('   先把封面渲出来（shoot），工程就在输出目录里: <out>/尝试1/封面_世界.blend')
+        return 1
     b = find_blender(a.blender)
     r = animate(b, a.blend, a.out, total=a.frames, fps=a.fps,
                 kind=getattr(a, 'preset', 'killaura'),
@@ -148,8 +216,13 @@ def cmd_anim(a):
 def cmd_check(a):
     import json
     from vision_check import check_image
+    bad = 0
     for p in a.images:
         r = check_image(p)
+        if not r.get('ok', True):
+            print('❌ %s' % r.get('error'))
+            bad += 1
+            continue
         if a.json:
             print(json.dumps({'path': p, **r}, ensure_ascii=False, indent=2))
         else:
@@ -157,7 +230,7 @@ def cmd_check(a):
             print(f"  {r.get('verdict')}  {r.get('score')} 分")
             for i, s in enumerate(r.get('issues', []), 1):
                 print(f'  ⚠️  [{i}] {s}')
-    return 0
+    return 1 if bad else 0
 
 
 def cmd_map(a):
@@ -195,9 +268,9 @@ def main():
     s = sub.add_parser('scan', help='在存档里找机位')
     s.add_argument('save')
     s.add_argument('--area', type=_area, required=True)
-    s.add_argument('--y', default='50,200')
-    s.add_argument('--radius', type=int, default=15)
-    s.add_argument('--top', type=int, default=12)
+    s.add_argument('--y', type=_pair_int, default=(50, 200))
+    s.add_argument('--radius', type=_posint, default=15)
+    s.add_argument('--top', type=_posint, default=12)
     s.add_argument('--json', default=None)
     s.set_defaults(func=cmd_scan)
 
@@ -205,25 +278,25 @@ def main():
     h.add_argument('save')
     h.add_argument('--area', type=_area, required=True)
     h.add_argument('--out', required=True)
-    h.add_argument('--center', default=None, help='x,z —— 不给就自动找')
-    h.add_argument('--radius', type=int, default=44)
+    h.add_argument('--center', type=_pair_int, default=None, help='x,z —— 不给就自动找')
+    h.add_argument('--radius', type=_posint, default=44)
     h.add_argument('--yaw', type=float, default=None)
     h.add_argument('--cam-az', type=float, default=None)
     h.add_argument('--dist', type=float, default=None)
     h.add_argument('--sky', type=float, default=None)
     h.add_argument('--sink', type=float, default=None)
-    h.add_argument('--res', default=None, help='输出尺寸，如 1920x1080（默认 1280x720）')
-    h.add_argument('--samples', type=int, default=None, help='EEVEE 采样数，默认 256')
+    h.add_argument('--res', type=_res, default=None, help='输出尺寸，如 1920x1080（默认 1280x720）')
+    h.add_argument('--samples', type=_posint, default=None, help='EEVEE 采样数，默认 256')
     h.add_argument('--view-transform', default=None)
-    h.add_argument('--attempts', type=int, default=3)
+    h.add_argument('--attempts', type=_posint, default=3)
     h.add_argument('--target', type=int, default=85)
     h.set_defaults(func=cmd_shoot)
 
     n = sub.add_parser('anim', help='出动画（10 秒杀戮光环）')
     n.add_argument('blend', help='封面工程 .blend')
     n.add_argument('--out', required=True)
-    n.add_argument('--frames', type=int, default=240)
-    n.add_argument('--fps', type=int, default=24)
+    n.add_argument('--frames', type=_posint, default=240)
+    n.add_argument('--fps', type=_posint, default=24)
     n.add_argument('--preview', default=None, help='只渲这些帧，如 1,60,120')
     n.add_argument('--preset', choices=['killaura', 'aura'], default='killaura',
                    help='killaura=进圈就死（默认）；aura=挥砍+装饰光环')
@@ -240,7 +313,14 @@ def main():
     mp.set_defaults(func=cmd_map)
 
     a = ap.parse_args()
-    return a.func(a)
+    try:
+        return a.func(a)
+    except FileNotFoundError as e:
+        print('❌ %s' % e)
+        return 1
+    except PermissionError as e:
+        print('❌ 没有权限访问: %s' % e)
+        return 1
 
 
 if __name__ == '__main__':
