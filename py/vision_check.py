@@ -392,6 +392,10 @@ def check_sky(img, box):
             'sky_hue_std': round(hue_std, 2),
             'sky_row_grad': round(row_grad, 3),
             'sky_hot_ratio': round(float((val > 0.92).mean()), 5),
+            # 亮度单独给一个数：判断「没有高光斑」要分情况 ——
+            # 逆光/黄金时刻的天空整体就很亮（均值 >0.7），没有一块被削顶的
+            # 高光斑是正常的；暗而平的天空才是病。
+            'sky_bright': round(float(val.mean()), 4),
             'pixels': int(reg.shape[0] * reg.shape[1])}
 
 
@@ -648,9 +652,14 @@ def check_image(path, subject_box=None, verbose=False):
                 issues.append(f"天空既没有地平线渐变也没有高光（行梯度 "
                               f"{sk['sky_row_grad']}，高光占比 {sk['sky_hot_ratio']}）")
                 score -= 8
-            if not solid and sk['sky_hot_ratio'] < 0.001:
+            # ⚠️ 以前只要 hot_ratio≈0 就扣 6 分，而太阳圆面常常在画外、
+            #    逆光天空整体又很亮 —— 于是每张图都被扣这一刀（"没有高光斑"
+            #    和"过曝成白板"两条判据互为死锁）。现在只在天空本身偏暗、
+            #    又没有任何高光时才判它平。
+            if not solid and sk['sky_hot_ratio'] < 0.001 and sk['sky_bright'] < 0.72:
                 issues.append(f"天空没有任何高光斑（hot_ratio="
-                              f"{sk['sky_hot_ratio']}，采样 {sk['pixels']} px）")
+                              f"{sk['sky_hot_ratio']}，亮度 {sk['sky_bright']:.2f}，"
+                              f"采样 {sk['pixels']} px）")
                 score -= 6
             elif sk['sky_hot_ratio'] > 0.55:
                 # ★ 反过来的病：天空整片顶到近白（verify5 实测 0.79），没有黄金时刻颜色
