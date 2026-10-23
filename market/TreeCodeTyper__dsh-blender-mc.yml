@@ -1,0 +1,7 @@
+﻿url: https://github.com/TreeCodeTyper/dsh-blender-mc
+name: TreeCodeTyper/dsh-blender-mc
+category: tools
+description:
+  en: 'Turns a Minecraft Java save into a Blender cover or a 10-second animation: picks the camera spot, exports the terrain, sets up lighting and materials, renders, then reviews the frame with OpenCV and re-renders until it passes. Upload maps and skins from the DSH settings page. Requires Blender 4.2 LTS and Python 3.10+.'
+  zh: '把 Minecraft 存档变成 Blender 封面或 10 秒动画：自动挑机位、导出地形、布光配材质、渲染，再用 OpenCV 审图，不合格自动调参重渲。地图和人物皮肤都能在 DSH 设置页直接上传。需 Blender 4.2 LTS 与 Python 3.10+。'
+icon: https://raw.githubusercontent.com/TreeCodeTyper/dsh-blender-mc/main/assets/icon-180.png
