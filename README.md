@@ -278,6 +278,11 @@ python py/cli.py shoot <存档> --area x0,x1,z0,z1 --out <目录>
 
 # 出动画（默认 10 秒杀戮光环）
 python py/cli.py anim <封面工程.blend> --out <目录> [--preview 1,60,120]
+python py/cli.py anim <封面工程.blend> --preset yujian --out <目录>   # 御剑飞天
+python py/cli.py anim <封面工程.blend> --preset <配方名> --out <目录>  # 自己写的配方
+
+# 分镜成片：一份分镜表 → 多镜头渲染 → 按顺序剪成一支 MP4（同时写 分镜表.md）
+python py/cli.py film --plan 分镜.json --out <目录> [--animatic]
 
 # 只审图，不跑 Blender
 python py/cli.py check <图...> [--json]
@@ -286,6 +291,73 @@ python py/cli.py check <图...> [--json]
 python py/cli.py map import --zip <存档.zip> [--name 名字]
 python py/cli.py map list | resolve --name <名字> | rename | delete | default | doctor
 ```
+
+### 一句话出片：分镜成片（0.4.0）
+
+`mc_anim` 出来的是**一条 240 帧的长镜头**。真实片子是"分镜表定几个镜头，每镜单独渲，
+最后剪起来"——这就是 `mc_film` 干的事，你只要说一句话：
+
+> 把刚才的御剑飞天剪成 10 秒：先中景看符阵亮、再低机位仰拍冲天、最后大远景飞进云里
+
+模型会写一份分镜表交给 `mc_film`，它依次做：**逐镜建工程（同一套动作、不同机位）→ 按帧区间渲 → 重编号 → ffmpeg 拼接 → 写 分镜表.md**。
+
+分镜表就是一份 JSON，想自己改随时改：
+
+```json
+{
+  "title": "御剑飞天", "fps": 24, "res": "960x540", "samples": 24,
+  "shots": [
+    {"id": "S01", "preset": "yujian", "range": [1, 72], "shot_size": "中景",
+     "camera": "平视缓推", "note": "符阵亮起、剑从土里浮出",
+     "env": {"DSH_YJ_CAM_D_SCALE": "0.95"}},
+    {"id": "S02", "preset": "yujian", "range": [66, 158], "shot_size": "全景",
+     "camera": "低机位仰拍跟随", "note": "踏上剑、冲天而过树线",
+     "env": {"DSH_YJ_CAM_AZ_ADD": "-14", "DSH_YJ_CAM_Z_ADD": "-0.8"}}
+  ]
+}
+```
+
+- `range` 是**预设时间轴上的帧区间**（yujian 是 1–240）——同一段动作，切一段就是一个镜头
+- `env` 只覆盖**机位**参数：`DSH_YJ_CAM_AZ_ADD` 转机位、`CAM_D_SCALE` 推拉、`CAM_LENS_SCALE` 变焦、
+  `CAM_RISE_ADD` 抬不抬头、`CAM_Z_ADD` 高低机位。动作本身不变，所以镜头之间能直接对切
+- 同一 preset + 同一组 env 的镜头只建一次工程（缓存），3 个镜头不会建 3 遍
+- 先加 `--animatic` 出 480×270 低清样片**只看节奏**，节奏对味了再去掉它出正式版
+
+### 新增一支动画 = 写一份配方（0.4.0）
+
+以前每加一支片子，都得复制一份 `animate_xxx.py`（各 300~580 行），里面七成是一模一样的
+脚手架：找骨架、打关键帧、建自发光材质、搭相机跟拍、配 Glare、写日志。改一处配色要改三份。
+
+现在拆成两层：
+
+```
+py/blender/animate_recipe.py   不到 60 行壳：读 JSON → anim_kit.build()
+py/blender/anim_kit.py         内核：动作 / 武器 / 特效 / 相机 / 灯光 / 渲染 全在这
+py/blender/presets/yujian.json 御剑飞天的全部参数（动作、姿态、特效、机位、渲染）
+py/blender/presets/dash.json   踏剑冲刺——只为证明"零代码"：它是纯 JSON
+py/blender/presets/README.md   配方格式说明（每个键干什么）
+```
+
+于是：
+
+```bash
+# 用配方（preset 名字就是 JSON 文件名）
+python py/cli.py anim 封面.blend --preset yujian --out .\out --preview 1,110,205
+# 想改这支片子的节奏/机位/颜色：改 yujian.json 里的数字，不用碰 Python
+# 想要一支新片子：复制 yujian.json → 改 motion/fx/camera → 存成 <新名字>.json
+python py/cli.py anim 封面.blend --preset <新名字> --out .\out
+```
+
+内核只把三样东西留成"可插拔函数"，因为它们没法用数字描述：
+
+| 表 | 管什么 | 什么时候要动它 |
+|---|---|---|
+| `MOTIONS` | 运动形状（`fly`=沿轴飞+转身+俯仰侧倾） | 要"绕柱子螺旋"这种新形状 |
+| `WEAPONS` | 载具/道具姿态（`ridden_sword`=把剑放大横在脚下） | 要"双剑交叉""御符"这种新载具 |
+| `FX` | 特效种类（`rune_ring`/`shockwave`/`trail`/`streaks`/`particles`） | 要全新视觉元素 |
+
+**这三张表够用时，新动画就是纯配置。** 不够时往表里加一个函数，所有旧配方不受影响——
+这就是复用的边界：改一处，全体受益；加一个，不碰旧的。
 
 ### 在 DSH 里直接用
 
@@ -299,7 +371,7 @@ python py/cli.py map list | resolve --name <名字> | rename | delete | default 
 
 > 用我上传的「方可梦世界」出三张不同机位的封面
 
-模型会自己判断该调哪个工具（`mc_doctor` / `mc_extract_models` / `mc_scan` / `mc_shoot` / `mc_anim` / `mc_check`）。
+模型会自己判断该调哪个工具（`mc_doctor` / `mc_extract_models` / `mc_scan` / `mc_shoot` / `mc_anim` / `mc_film` / `mc_check`）。
 上传过的地图可以直接用 `map` 参数点名（见[第 5 步](#第-5-步可选把你的地图传进-dsh)），不用报路径。
 
 ### 自带模型（可选）
@@ -355,10 +427,11 @@ python py/cli.py shoot "D:/saves/我的世界" --area -2100,-1600,-1400,-900 --o
 
 ```
 dsh-blender-mc/
-├── lib/index.js              DSH 插件外壳：注册 7 个工具，调 Python
+├── lib/index.js              DSH 插件外壳：注册 8 个工具，调 Python
 ├── py/
 │   ├── cli.py                命令行入口
 │   ├── pipeline.py           ★ 编排 + 审图闭环 + auto_adjust
+│   ├── film.py               ★ 分镜成片：多镜头 → 重编号 → 拼接 + 分镜表.md
 │   ├── vision_check.py       ★ OpenCV 审图
 │   ├── bedrock.py            Bedrock 几何（.geo.json）→ OBJ
 │   ├── extract.py            批量提取模型 + 猜贴图 + 写清单
@@ -371,7 +444,11 @@ dsh-blender-mc/
 │       ├── _compat.py        ★ Blender 版本兼容层
 │       ├── export_obj.py     存档 → OBJ
 │       ├── build_cover.py    搭场景 + 渲染（含自带模型落位）
-│       └── animate_aura.py   杀戮光环动画
+│       ├── animate_aura.py   杀戮光环动画（老脚本）
+│       ├── animate_yujian.py 御剑飞天（转发壳 → presets/yujian.json）
+│       ├── animate_recipe.py ★ 通用驱动：读 JSON 配方 → anim_kit
+│       ├── anim_kit.py       ★ 动画内核：动作/武器/特效/相机/灯光/渲染
+│       └── presets/          ★ 动画配方（yujian.json / dash.json / README.md）
 ├── docs/                     使用教程 / 自带模型 / 发布指南
 └── vendor/                   ← 装配出来的第三方资产（.gitignore 排除）
 ```

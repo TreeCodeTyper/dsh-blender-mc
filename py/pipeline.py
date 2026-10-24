@@ -520,6 +520,32 @@ def shoot(save, area, out_root, blender=None, params=None, center=None,
     return result
 
 
+def _newest_blend(out_dir, since):
+    """取这一步（mtime >= since）新写出来的 .blend。
+
+    ⚠️ 坑 70：Blender 里 --python 抛异常时**进程退出码仍是 0**（5.2.3 实测），
+    所以 pipeline 里凡是"跑 Blender"的地方都不能只看 rc，必须按产物判断。
+    以前这里还把产物名写死成 '杀戮光环.blend'，新增预设时产物名不同，
+    就会拿着一个不存在的路径去渲染 —— 现在按目录里最新那个 .blend 找。
+    """
+    best, best_t = None, since - 1e-6
+    try:
+        names = os.listdir(out_dir)
+    except OSError:
+        return None
+    for name in names:
+        if not name.endswith('.blend'):
+            continue
+        path = os.path.join(out_dir, name)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if mtime >= best_t:
+            best, best_t = path, mtime
+    return best
+
+
 def animate(blender_exe, blend, out_dir, total=240, fps=24, kind='aura',
             preview=None, progress=print):
     """在封面工程上做动画（默认杀戮光环）。
@@ -527,17 +553,41 @@ def animate(blender_exe, blend, out_dir, total=240, fps=24, kind='aura',
     只渲【帧序列】：插件不替你合成视频 —— 转 MP4/GIF 需要用 ffmpeg，
     命令会由 cli 打印出来（见 cmd_anim）。
     """
-    script = os.path.join(BLENDER_DIR,
-                          'animate_killaura.py' if kind == 'killaura'
-                          else 'animate_aura.py')
+    _SCRIPTS = {
+        'killaura': 'animate_killaura.py',
+        'aura': 'animate_aura.py',
+        'yujian': 'animate_yujian.py',
+    }
+    # 先看有没有 JSON 配方：有就走通用驱动 animate_recipe.py
+    # （新增一支动画 = 写一份 presets/<名>.json，不用再写一个 animate_*.py）
+    recipe = os.path.join(BLENDER_DIR, 'presets', '%s.json' % kind)
+    recipe = recipe if os.path.exists(recipe) else None
+    blend_name = None
+    if recipe:
+        script = os.path.join(BLENDER_DIR, 'animate_recipe.py')
+        try:
+            with open(recipe, 'r', encoding='utf-8') as _f:
+                blend_name = json.load(_f).get('blend_name')
+        except Exception:
+            blend_name = None
+    else:
+        script = os.path.join(BLENDER_DIR, _SCRIPTS.get(kind, 'animate_aura.py'))
     os.makedirs(out_dir, exist_ok=True)
     out_dir = os.path.abspath(out_dir)      # 同上：相对路径 Blender 会写不进去
     args = [blender_exe, '-b', blend, '--python', script, '--',
             out_dir, str(total), str(fps), preview or '']
+    if recipe:
+        args.append(recipe)
+    t0 = time.time()
     rc, out = run(args, log=os.path.join(out_dir, '_anim.log'))
     if rc != 0:
         raise RuntimeError(f'建动画失败\n{out[-2000:]}')
-    ablend = os.path.join(out_dir, '杀戮光环.blend')
+    # rc 靠不住（见坑 70），按"这一步有没有新写出 .blend"判断动画脚本真的跑完了
+    ablend = _newest_blend(out_dir, t0)
+    if not ablend:
+        hint = f'（期望产物：{blend_name}）' if blend_name else ''
+        raise RuntimeError(f'动画脚本没有生成工程{hint}，多半是脚本自己抛异常了\n'
+                           f'{out[-2000:]}')
     if preview:
         return {'blend': ablend, 'frames': None, 'preview': True}
     rc, out = run([blender_exe, '-b', ablend, '-a'],

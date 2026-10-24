@@ -162,6 +162,24 @@ def cmd_shoot(a):
     from pipeline import shoot
     if not _need_save(a.save):
         return 1
+    skin = getattr(a, 'skin', None)
+    if skin:
+        # 皮肤认「绝对路径」或「皮肤库里的名字」；build_cover.py 直接读 DSH_SKIN
+        path = skin
+        if not os.path.isfile(path):
+            home = os.environ.get('DSH_HOME') or os.path.join(
+                os.environ.get('USERPROFILE') or os.path.expanduser('~'), '.dsh')
+            for cand in (os.path.join(home, 'blender-mc', 'skins', skin),
+                         os.path.join(home, 'blender-mc', 'skins', skin + '.png')):
+                if os.path.isfile(cand):
+                    path = cand
+                    break
+        if not os.path.isfile(path):
+            print(f'❌ 找不到皮肤: {skin}')
+            print('   给绝对路径，或把 png 放进 <DSH_HOME>/blender-mc/skins/ 再用名字')
+            return 1
+        os.environ['DSH_SKIN'] = os.path.abspath(path)
+        print(f'皮肤: {os.environ["DSH_SKIN"]}')
     params = {}
     if a.yaw is not None:
         params['yaw'] = a.yaw
@@ -210,6 +228,29 @@ def cmd_anim(a):
         print('\n转视频:')
         print(f'  ffmpeg -framerate {r["fps"]} -i "{r["dir"]}\\frame_%04d.png" '
               f'-c:v libx264 -crf 18 -pix_fmt yuv420p -movflags +faststart out.mp4')
+    return 0
+
+
+def cmd_film(a):
+    """分镜表 → 多镜头 → 成片（逻辑在 film.py）"""
+    import json
+    from pipeline import find_blender
+    import film as film_mod
+
+    if a.plan:
+        plan = film_mod.load_plan(a.plan)
+    elif a.plan_json:
+        plan = film_mod.load_plan(a.plan_json)
+    else:
+        print('❌ 要给 --plan <分镜表.json> 或 --plan-json \'{"shots":[...]}\'')
+        return 1
+    if a.blend:
+        plan['blend'] = a.blend
+    b = find_blender(a.blender)
+    r = film_mod.film(b, plan, a.out, animatic=a.animatic, progress=print)
+    print()
+    print(json.dumps({k: v for k, v in r.items() if k != 'shots'},
+                     ensure_ascii=False, indent=2))
     return 0
 
 
@@ -288,6 +329,8 @@ def main():
     h.add_argument('--res', type=_res, default=None, help='输出尺寸，如 1920x1080（默认 1280x720）')
     h.add_argument('--samples', type=_posint, default=None, help='EEVEE 采样数，默认 256')
     h.add_argument('--view-transform', default=None)
+    h.add_argument('--skin', default=None,
+                   help='人物皮肤：绝对路径，或皮肤库里的名字（<DSH_HOME>/blender-mc/skins/）')
     h.add_argument('--attempts', type=_posint, default=3)
     h.add_argument('--target', type=int, default=85)
     h.set_defaults(func=cmd_shoot)
@@ -298,9 +341,20 @@ def main():
     n.add_argument('--frames', type=_posint, default=240)
     n.add_argument('--fps', type=_posint, default=24)
     n.add_argument('--preview', default=None, help='只渲这些帧，如 1,60,120')
-    n.add_argument('--preset', choices=['killaura', 'aura'], default='killaura',
-                   help='killaura=进圈就死（默认）；aura=挥砍+装饰光环')
+    n.add_argument('--preset', default='killaura',
+                   help='预设名：killaura=进圈就死（默认）；aura=挥砍+装饰光环；'
+                        'yujian=御剑飞天；也可以是自己放进 '
+                        'py/blender/presets/ 的任意 <名字>.json（写配方即出新动画，不用改代码）')
     n.set_defaults(func=cmd_anim)
+
+    f = sub.add_parser('film', help='分镜表 → 多镜头 → 剪成一支成片（含分镜表.md）')
+    f.add_argument('--plan', default=None, help='分镜表 .json 路径')
+    f.add_argument('--plan-json', default=None, help='直接给分镜表 JSON 字符串')
+    f.add_argument('--blend', default=None, help='覆盖分镜表里的封面工程路径')
+    f.add_argument('--out', required=True)
+    f.add_argument('--animatic', action='store_true',
+                   help='低清样片（480x270 / 8 samples），只看节奏')
+    f.set_defaults(func=cmd_film)
 
     c = sub.add_parser('check', help='只审图')
     c.add_argument('images', nargs='+')
