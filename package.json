@@ -68,6 +68,7 @@
   "files": [
     "lib",
     "py/**/*.py",
+    "py/**/*.json",
     "docs/*.md",
     "scripts/*.py",
     "scripts/*.mjs",
