@@ -57,3 +57,15 @@
         mapsDir: ''
         # 单个 zip 上传上限（MiB）。默认 2048，上限受解压后 6 GiB 另行限制。
         maxUploadMb: 2048
+        # ★ 就绪自检（0.4.1 起，全部可选，不写就是下面这些默认值）：
+        #   插件装好后自己派一次「便宜」的体检（只读目录、导入模块，不起 Blender），
+        #   把缺哪几项写进 <DSH_HOME>/blender-mc/readiness.json；有缺口时 AI 会在
+        #   下一次对话开头主动告诉你缺什么、怎么装；装齐了就一个字都不说。
+        #
+        #   startupCheck:
+        #     'cache' —— 先读缓存，过期/换版本才在后台补刷（默认，推荐）
+        #     'full'  —— 每次启动都在后台跑一遍深检（更准，慢一两秒）
+        #     'off'   —— 完全不检测（只跑 mc_doctor 手动体检）
+        startupCheck: 'cache'
+        #   缓存有效期（小时）。默认 12；0 或负数按 12 处理。
+        readinessTtlHours: 12

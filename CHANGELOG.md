@@ -6,6 +6,58 @@
 
 ---
 
+## [0.4.1] - 2026-10-24
+
+装完插件，AI 自己先说"你还缺什么"。
+
+以前要用户主动想起 `mc_doctor`，才会看到一屏红线；新手往往先撞上
+`mc_shoot` 的报错，才知道缺 MCprep / cv2 / 骨架。这一版加了一次**便宜的自检**，
+结果缓存到 `<DSH_HOME>/blender-mc/readiness.json`，有缺口时作为一段运行时上下文
+喂给模型 —— 用户下一次开口，AI 就会主动列出缺哪几项、每项一句怎么装。
+
+### 新增
+
+- **`py/readiness.py`**：不跑 Blender 的条件下体检七项（Python 依赖 / Blender /
+  MCprep / 角色骨架 / 物品骨架 / 方块贴图 / ffmpeg）。只读目录 + 导入模块，
+  单次通常几十毫秒。`--deep` 才额外问一次 Blender（会慢 5-10 秒，仅供手动排查）。
+- **`cli.py readiness`** 子命令：`--json` 出快照、`--no-write` 只打印不落盘。
+- **`systemPrompt` 运行时上下文**：只在确有缺口时注册（`dsh-blender-mc/readiness`），
+  装齐了就一个字都不说。宿主没有该服务时静默跳过。
+- 新配置（都可省略）：`startupCheck: 'cache' | 'full' | 'off'`（默认 `cache`）、
+  `readinessTtlHours`（默认 12）。
+- `mc_doctor` 跑完会顺手刷新这份缓存，所以"装完 → 自检 → 结论"会立刻同步。
+
+### 说明
+
+- **绝不在会话启动或提示词组装路径里起子进程**。缓存过期只在后台补刷，
+  失败一律静默 —— 自检是锦上添花，不能拖慢任何一次对话。
+- 缓存按"插件版本 + Blender 路径 + Python 路径"判定是否还作数；升级插件后
+  旧结论不会被拿去提示人。
+
+### 修掉的两个 bug（在真实宿主里才暴露出来）
+
+- **插件可能整个加载不起来**：原来用 `ctx.timeout` 排后台探测。`ctx.timeout` 跑在
+  Cordis 的 `timer` 服务背后，`inject` 里没声明就直接抛
+  `cannot get property "timer" without inject`，插件 entry 当场 `did not activate`。
+  改成原生 `setTimeout`（带 `unref`，dispose 时清掉），不再依赖宿主服务。
+- **显式配了 `blender` 路径的用户，所有工具调用都会失败**：`runCli` 把
+  `--blender <路径>` 插到了 `python` 与 `cli.py` 中间，实际命令成了
+  `python --blender X cli.py …`，python 自己不认识这个选项，直接
+  `Unknown option: --blender` 退出 2。改成插在 `cli.py` 之后。两种写法都实测过。
+- 顺手：`spawn` 同步失败（比如受限环境里的 `EPERM`）不再变成未处理 rejection，
+  而是照常返回 `code: -1` 和 `[启动失败] …` 说明。
+
+### 升级
+
+```bash
+npm i -g dsh-blender-mc@0.4.1   # 或在 DSH 里重装插件
+python py/cli.py readiness      # 想看当前结论可以直接跑
+```
+
+老版本配置不用改：两个新键缺省即按上面的默认值工作。
+
+---
+
 ## [0.4.0] - 2026-10-24
 
 这一版把"每支片子一个脚本"改成"一个内核 + 一份 JSON 配方"，顺带修掉两个一直存在的 bug。

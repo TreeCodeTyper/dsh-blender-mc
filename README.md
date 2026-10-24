@@ -59,6 +59,13 @@ mc_setup
 mc_shoot { "map": "方可梦世界", "out": "E:/出图" }
 ```
 
+**缺东西它会先说**：装完之后插件会在后台跑一次体检（只读目录、不启动 Blender，
+几十毫秒），结论缓存在 `<DSH_HOME>/blender-mc/readiness.json`。缺 MCprep / cv2 /
+骨架这类必需项时，**AI 会在你下一次开口时主动列出缺哪几项、每项一句怎么装**；
+装齐了就一个字都不说。想立刻看结论：跑一次 `mc_doctor`，或终端
+`python py/cli.py readiness`。自检可以关：插件配置里 `startupCheck: 'off'`
+（默认 `'cache'`，每次都深检用 `'full'`）。
+
 **传地图**：设置 → 背景地图 → 把存档或整合包压成的 `.zip` 拖进去，自动解压识别，
 之后 `mc_shoot({ "map": "名字" })` 就能点名出图（`map` 会自动补存档路径和搜索范围）。
 

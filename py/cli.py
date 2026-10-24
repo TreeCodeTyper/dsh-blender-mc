@@ -126,6 +126,27 @@ def cmd_doctor(a):
     return 0 if all(ok for _, ok, _, spec in res if spec['required']) else 1
 
 
+def _cmd_readiness(a):
+    """便宜版自检：算快照、写缓存、把给模型看的 hint 打出来。
+
+    ⚠️ 这里刻意不复用 doctor：doctor 会打印几十行完整指引、还可能花 5-10 秒
+       问 Blender；readiness 是后台几十毫秒跑完的东西（插件每台机器每次都会跑）。
+    """
+    import readiness
+    snap = readiness.snapshot(getattr(a, 'blender', None), deep=getattr(a, 'deep', False))
+    if not getattr(a, 'no_write', False):
+        try:
+            snap['cache_file'] = readiness.write_cache(snap)
+        except Exception as e:      # 缓存写不进去不能影响主流程
+            snap['cache_error'] = str(e)
+    if getattr(a, 'json', False):
+        import json
+        print(json.dumps(snap, ensure_ascii=False, indent=2))
+    else:
+        print(snap['hint'] or '✅ 运行条件齐全，没有要提示的。')
+    return 0
+
+
 def cmd_extract(a):
     """把资源目录里的 Bedrock 几何批量转成 OBJ，交给 Blender 摆放。"""
     import json
@@ -289,6 +310,16 @@ def main():
 
     d = sub.add_parser('doctor', help='自检')
     d.set_defaults(func=cmd_doctor)
+
+    # 便宜版自检：只读目录/环境变量，结果落盘给插件在会话里主动提示用。
+    # ⚠️ 和 doctor 的分工要记清：doctor 是「人想知道到底哪坏了」，会给完整指引、
+    #   会花 5-10 秒问 Blender；readiness 是「插件需要一句话知道缺什么」，
+    #   必须在后台几十毫秒内跑完，绝不能反过来调 doctor。
+    rd = sub.add_parser('readiness', help='廉价的运行条件快照（写缓存，供插件提示用）')
+    rd.add_argument('--deep', action='store_true', help='额外问一次 Blender（5-10 秒）')
+    rd.add_argument('--json', action='store_true', help='输出完整 json')
+    rd.add_argument('--no-write', action='store_true', help='只算不写缓存')
+    rd.set_defaults(func=lambda a: _cmd_readiness(a))
 
     st = sub.add_parser('setup', help='装配外部资产（从本地资源目录搬到 vendor/）')
     st.add_argument('sources', nargs='*', help='资源目录，如 pack/')
