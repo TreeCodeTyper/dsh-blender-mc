@@ -6,6 +6,34 @@
 
 ---
 
+## [0.4.3] - 2026-10-24
+
+面板上传大 zip 报「浏览器没报文件大小（Content-Length 缺失）」—— 真凶找到了。
+
+浏览器页面发出的 XHR 到插件路由这一路上，请求体被改成了分块传输
+（`Transfer-Encoding: chunked`），**没有 `Content-Length`**；而 `handleUpload`
+把它当硬性前置条件，缺头直接 `411 map.length-required`，于是 943 MB 的存档
+在面板里永远传不上去。同一个接口用 curl（带 Content-Length）一直是 201，
+所以之前测后端「全通」没暴露这个问题。
+
+### 修复
+
+- **地图上传不再强制 Content-Length**（`lib/map-routes.js` `handleUpload`）：
+  有头就拿来做提前 413，没头照收 —— 上限本来就在「边收边数」里卡着
+  （`received > maxUploadBytes` 立刻掐断并 413）。头存在但不合法才 400。
+- **皮肤上传同样处理**（`handleSkinUpload`）：chunked 也收，超过 2 MB 时
+  在收流过程中就 413。
+- **空请求体单独报错**：收完 0 字节 → `map.empty`（「这个文件是空的」），
+  不再伪装成 Content-Length 问题。
+- 错误码映射里 `skin.empty` 指向 `errors.empty_file`（以前错指到「不是 PNG 文件」）。
+
+### 说明
+
+- `Content-Length` 缺头时进度条仍按浏览器自己的 `lengthComputable` 报百分比，
+  不受影响。
+- 这次改的是**宿主侧**路由文件，装好后要重启 DSH（关掉再打开）才进内存；
+  只刷新页面不够。
+
 ## [0.4.2] - 2026-10-24
 
 「上传了，但认不出文件」——这一版就是把这条链路从头到尾补上反馈。
