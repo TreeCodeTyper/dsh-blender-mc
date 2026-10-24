@@ -6,6 +6,51 @@
 
 ---
 
+## [0.4.2] - 2026-10-24
+
+「上传了，但认不出文件」——这一版就是把这条链路从头到尾补上反馈。
+
+线上数据库里两条真实存档（`鉴于王国整合包地图1.zip`、`方可梦世界地图.zip`）的
+`levelName` **都是「新的世界」**，而面板卡片只显示体积和范围，于是传完两张
+长得一模一样、分不清哪张是哪个 zip；重命名的「保存」按钮其实是坏的
+（mousedown 先触发 input 的 blur，React 把按钮卸载掉，click 永远到不了提交函数），
+想改个名字只能靠回车；地图字节传完 = 100%，后端还在解压读 level.dat，
+界面上毫无动静，像卡死；`warnings`（「zip 里有多个存档，已选…」）一个字都不显示；
+皮肤传上去不会自动启用，出图还是 Steve。后端本身没问题 —— 拿 358 MB / 943 MB
+的真实 zip 直传 HTTP 接口都是 201，坏的都在前端与「传完之后的反馈」。
+
+### 修复
+
+- **重命名的「保存」按钮能用了**：按钮加 `onMouseDown: preventDefault()` 保住
+  输入框焦点，`onBlur` 从「丢弃改动」改成「提交改动」（Esc 用 `cancelRef` 挡住，
+  不会误提交）；按钮文案从 `card.renamingHint`（那是「Enter 保存，Esc 取消」的
+  提示语）改成真正的「保存」。
+- **卡片能认出是哪份文件**：地图卡片补上 `版本 / N 个 region / 源文件 xxx.zip`，
+  存档内名（`levelName`）与显示名不同时额外标一行 —— 两张「新的世界」不会再混淆。
+- **报错说人话**：后端错误码是带命名空间的（`save.not-found`、`map.bad-ext`、
+  `zip.unreadable`、`skin.bad-size` …），原来直接拼 `errors.<code>` 查词表，
+  一个都命不中，永远显示「出错了：<Python 原文>」。现在加了 `ERROR_ALIASES`
+  映射，`save.not-found` 会明确告诉你*要选到含 level.dat 和 region/ 的那一层*。
+- **传完到入库之间不再装死**：进度到 100% 后切到「上传完成，正在解压、识别存档…」，
+  并隐藏「取消上传」（那之后取消已经没有意义）。
+- **入库摘要与警告都显示出来**：成功提示改成「已入库「名字」· 版本 · N 个 region
+  文件」，后面逐条列出后端返回的 `warnings`（多存档、出生点扩范围等）。
+- **新皮肤自动设为默认**：`addSkin` 只在「库里还没有默认」时才写 `defaultId`，
+  第二张之后传的皮肤永远不会生效。现在 `POST /skins` 上传完顺手
+  `setDefaultSkin`，响应里带 `defaultId`，面板提示「已上传「名字」并设为默认」。
+
+### 说明
+
+- 新增中英文文案键：`card.save` / `card.version` / `card.regions` / `card.source` /
+  `card.levelName`、`upload.importing` / `upload.recognized` /
+  `upload.recognizedNoVersion` / `upload.warning`、`errors.save_not_found` /
+  `errors.save_no_region` / `errors.zip_empty` / `errors.zip_encrypted` /
+  `errors.missing_world` / `errors.bad_type` / `errors.length_required` /
+  `errors.skin_bad_ext`、`skins.doneDefault`。
+- 客户端与路由都只改了 JS，没有动 Python 侧的解压/识别逻辑 —— 那条链路本来就对。
+- 装完要 **Ctrl+Shift+R 硬刷新** DSH Web 才会加载新 bundle（没跑 `dev:web` 时
+  客户端插件不热更新）。
+
 ## [0.4.1] - 2026-10-24
 
 装完插件，AI 自己先说"你还缺什么"。
