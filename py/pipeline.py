@@ -20,7 +20,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BLENDER_DIR = os.path.join(HERE, 'blender')
 sys.path.insert(0, HERE)
 
-from vision_check import check_image          # noqa: E402
+# ⚠️ 坑 77：vision_check 顶层就 `import cv2`。原来这行写在模块级别，结果「没装
+#   opencv 的机器」上连 `import pipeline` 都失败 —— requirements._find_blender()
+#   吞掉异常返回 None，doctor / readiness 就把已经装好的 Blender 报成"找不到"，
+#   还顺带把 rig/item/textures/ffmpeg 全判成缺失。改成用到时再 import。
 
 # ────────────────────────────────────────────────────────────
 # 默认参数 —— 每一项都是实测调出来的，注释写明为什么
@@ -335,7 +338,16 @@ def step_check(png, progress=print, annotate=None):
             progress(f'    ⚠️ 读 _subject_box.json 失败: {e}')
     else:
         progress('    (没有 _subject_box.json，退回按颜色自动找主体)')
+    from vision_check import check_image       # 见文件头 坑 77
     r = check_image(png, subject_box=box)
+    if not r.get('ok', True):
+        # ⚠️ 坑 78：图片读不出来（半截 png / 被别的程序占着）时 check_image 只回
+        #   {'ok': False}，没有 verdict/score。原来下面直接取 r['verdict']，
+        #   一个坏 png 就把整轮渲染变成 KeyError。这里补成一条 FAIL 报告，
+        #   让上层按「这轮没过」处理，而不是崩掉。
+        progress(f"    ⚠️ 审图失败: {r.get('error') or '图片读不出来'}")
+        r = dict(r, verdict='FAIL', score=0,
+                 issues=['审图失败：图片读不出来'], details={})
     progress(f"    审图: {r['verdict']} {r['score']} 分")
     for i, s in enumerate(r.get('issues', []), 1):
         progress(f"      ⚠️  [{i}] {s}")

@@ -176,16 +176,47 @@ def _find_blender(explicit=None):
         from pipeline import find_blender
         return find_blender(explicit)
     except Exception:
-        return None
+        # ⚠️ 坑 79：pipeline 顶层原来还牵着 cv2（见 pipeline.py 坑 77）。这里一句
+        #   `return None` 会把「缺 opencv」讲成「没装 Blender」，指引整套都是错的。
+        #   退回不依赖任何第三方库的粗略搜索 —— 宁可少报，不可误报。
+        return _find_blender_fallback(explicit)
+
+
+def _find_blender_fallback(explicit=None):
+    """不 import 任何第三方库的 Blender 搜索（pipeline 不可 import 时兜底）。"""
+    if explicit and os.path.isfile(explicit):
+        return explicit
+    for env in ('BLENDER', 'BLENDER_EXE', 'DSH_MC_BLENDER'):
+        p = os.environ.get(env)
+        if p and os.path.isfile(p):
+            return p
+    return shutil.which('blender')
+
+
+def _looks_like_addon(path):
+    """目录里有真文件才算装上 —— 空的 MCprep_addon/ 是卸载残留，不是插件。"""
+    try:
+        if not os.path.isdir(path):
+            return False
+        return any(f.endswith('.py') or f == '__init__.py'
+                   for f in os.listdir(path))
+    except OSError:
+        return False
 
 
 def _has_mcprep(blender_exe):
     if not blender_exe:
         return None
     for addons in _addon_dirs():
-        if os.path.isdir(addons) and any(
-                d.lower().startswith('mcprep') for d in os.listdir(addons)):
-            return True
+        if not os.path.isdir(addons):
+            continue
+        try:
+            names = os.listdir(addons)
+        except OSError:
+            continue
+        for d in names:
+            if d.lower().startswith('mcprep') and _looks_like_addon(os.path.join(addons, d)):
+                return True
     # 也问一下 Blender 本人（可能装在别的地方）
     expr = ("import addon_utils;"
             "print('MCPREP_OK' if any('MCprep' in m.__name__ "

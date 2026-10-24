@@ -301,6 +301,29 @@ def cmd_map(a):
     return maplib.main(a.rest)
 
 
+def _hoist_blender(argv):
+    """把任意位置的 `--blender X` / `--blender=X` 挪到最前面。
+
+    ⚠️ 坑 83：--blender 定义在顶层 parser 上，写在子命令后面会被 argparse 当
+    未知参数拒掉（`doctor --blender X` → exit 2）。人就是会这么写，所以先提。
+    """
+    rest, value, i = [], None, 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok == '--blender':
+            if i + 1 < len(argv):
+                value = argv[i + 1]
+                i += 2
+                continue
+            rest.append(tok)
+        elif tok.startswith('--blender='):
+            value = tok.split('=', 1)[1]
+        else:
+            rest.append(tok)
+        i += 1
+    return (['--blender', value] + rest) if value else rest
+
+
 def main():
     ap = argparse.ArgumentParser(
         prog='dsh-blender-mc',
@@ -397,7 +420,7 @@ def main():
                     help='import|list|get|resolve|rename|delete|default|doctor + 各自参数')
     mp.set_defaults(func=cmd_map)
 
-    a = ap.parse_args()
+    a = ap.parse_args(_hoist_blender(sys.argv[1:]))
     try:
         return a.func(a)
     except FileNotFoundError as e:

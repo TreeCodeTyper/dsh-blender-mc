@@ -47,6 +47,28 @@
 - 顺手：`spawn` 同步失败（比如受限环境里的 `EPERM`）不再变成未处理 rejection，
   而是照常返回 `code: -1` 和 `[启动失败] …` 说明。
 
+### 顺带修掉的 7 个老 bug（这轮审计出来的）
+
+- **没装 opencv 时，doctor / readiness 会把已经装好的 Blender 报成「找不到」**，
+  还打印整套「去 blender.org 下载」，并连带把骨架/贴图/ffmpeg 全判缺失。
+  根因是 `pipeline.py` 顶层 `from vision_check import check_image`（vision_check 顶层
+  `import cv2`），而 `requirements._find_blender()` 用 `except Exception: return None`
+  把 import 失败吞成了「没有 Blender」。现在 `check_image` 改成用到时才 import，
+  `_find_blender` 再多一层不依赖第三方库的兜底搜索。**这条不修，0.4.1 的主动提示
+  会对没装 cv2 的人满口假话。**
+- 空的 `MCprep_addon/` 残留目录被判成「已安装」（`requirements._has_mcprep` 只看目录名）。
+  现在要求目录里真有 `.py` 文件。
+- `readiness --deep` 的探测分支永远走不到（`if mp_dir` 写在 `elif deep` 前面，
+  只要目录存在就直接返回 True）—— 加了等于没加。
+- 截断的 `.mca`（<8 KiB）让 `anvil.Region.chunk_offsets()` 直接 `IndexError`，
+  崩掉 mc_scan / mc_shoot。现在当「这个区域没区块」跳过。
+- 坏 `.geo.json` 抛的是 `SystemExit`，而 `extract.py` 只 `except Exception` ——
+  一份坏模型让整批中止、`models.json` 都不写，跟注释说的「单个失败不影响整批」相反。
+- 审图读图失败时 `check_image` 只回 `{'ok': False}`（没有 `verdict`/`score`），
+  `step_check` 直接取 `r['verdict']` → 一个半截 png 就 `KeyError`。
+- `--blender` 写在子命令后面（`doctor --blender X`）会被 argparse 当成未知参数拒掉，
+  exit 2。现在解析前先把任意位置的 `--blender` 提到最前面。
+
 ### 升级
 
 ```bash

@@ -85,11 +85,13 @@ def _plugin_version():
 
 def _mcprep_dir():
     """只在 addons 目录里找 —— 不起 Blender（贵的那条路留给 doctor）。"""
-    from requirements import _addon_dirs
+    from requirements import _addon_dirs, _looks_like_addon
     for addons in _addon_dirs():
         try:
             if os.path.isdir(addons) and any(
-                    d.lower().startswith('mcprep') for d in os.listdir(addons)):
+                    d.lower().startswith('mcprep')
+                    and _looks_like_addon(os.path.join(addons, d))
+                    for d in os.listdir(addons)):
                 return addons
         except OSError:
             continue
@@ -130,15 +132,21 @@ def snapshot(blender=None, deep=False, with_hint=True):
     add('blender', bool(b), b or '找不到')
 
     mp_dir = _mcprep_dir()
-    if mp_dir:
-        add('mcprep', True, '已安装（addons 目录里有）')
-    elif deep:
-        # 只有 doctor 那种「我确实要诊断」的场景才值得花这 5-10 秒
+    if deep and b:
+        # ⚠️ 坑 80：以前 `if mp_dir:` 写在 `elif deep:` 前面 —— 只要 addons 目录里
+        #   有个同名目录，--deep 就永远走不到，「我确实要诊断」等于没加。
         from requirements import probe_mcprep_operator
-        op = probe_mcprep_operator(b) if b else None
-        add('mcprep', bool(op),
-            '装在别处（Blender 确认已注册）' if op else
-            ('Blender 里也没注册上' if op is False else '没找到'))
+        op = probe_mcprep_operator(b)
+        if op is True:
+            add('mcprep', True, 'Blender 确认已注册（操作符可用）')
+        elif op is False:
+            add('mcprep', False, '目录在，但 addon 没注册上（操作符不可用，跑 mc_doctor 看原因）')
+        else:
+            add('mcprep', bool(mp_dir),
+                '已安装（addons 目录里有，操作符没验成）' if mp_dir
+                else 'addons 目录里没找到（可能装在别处，跑 mc_doctor 复核）')
+    elif mp_dir:
+        add('mcprep', True, '已安装（addons 目录里有）')
     else:
         add('mcprep', False, 'addons 目录里没找到（可能装在别处，跑 mc_doctor 复核）')
 

@@ -129,6 +129,11 @@ class Region:
 
     def chunk_offsets(self):
         """返回 [(cx, cz, 字节偏移, 扇区数)]，只含已生成的区块"""
+        if len(self.raw) < 8192:
+            # ⚠️ 坑 81：区域文件头是 8 KiB（1024 条 4 字节索引 + 4 KiB 时间戳）。
+            #   截断/空文件以前直接 IndexError，把 mc_scan / mc_shoot 整条链路带崩；
+            #   现在当「这个区域没区块」，让调用方继续扫别的区域。
+            return []
         out = []
         for i in range(1024):
             b = i * 4

@@ -191,7 +191,11 @@ def extract(root, out, keyword=None, anim=None, anim_name=None,
             progress(f"  [{i}/{len(geos)}] {m['name']}  "
                      f"{m['verts']} 顶点 / {m['faces']} 面  "
                      f"贴图{'✓' if m['texture'] else '✗'}")
-        except Exception as e:                       # 单个失败不影响整批
+        except (Exception, SystemExit) as e:         # 单个失败不影响整批
+            # ⚠️ 坑 82：bedrock 那边用 `raise SystemExit('没有 minecraft:geometry')`
+            #   报坏模型，而 SystemExit 是 BaseException，`except Exception` 抓不到
+            #   —— 一份坏 .geo.json 会让整批中止、models.json 都不写，跟这句注释
+            #   说的「不影响整批」正好相反。
             rel = os.path.relpath(g, root)
             errors.append({"source": rel, "error": f"{type(e).__name__}: {e}"})
             progress(f"  [{i}/{len(geos)}] ✗ {rel} —— {type(e).__name__}: {e}")
