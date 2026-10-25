@@ -445,27 +445,46 @@ def _region_dir_candidates(save_dir):
                    os.path.join(ns_dir, dm, 'region'))
 
 
+def _count_mca(path):
+    try:
+        return sum(1 for f in os.listdir(path) if f.lower().endswith('.mca'))
+    except OSError:
+        return 0
+
+
 def find_region_dir(save_dir):
     """找主世界的 region 目录 → (相对路径, 绝对路径, .mca 数)。
 
-    经典 <save>/region 优先；没有再认 26.x 的 dimensions/<ns>/<dim>/region。
-    多个候选都存在时取 .mca 最多的那个（主世界通常比下界/末地大得多）。
+    优先级（按布局判断，**不是**按文件多少猜）：
+      1. `<save>/region` 有 .mca —— 经典布局（1.21.x 及更早）的主世界。这是最强
+         信号：这种存档里 `dimensions/<ns>/<dim>` 是数据包加的额外维度，即便它
+         被探索得比主世界还大，也不是主世界。
+      2. `<save>/dimensions/minecraft/overworld/region` —— 26.x 起的新布局，
+         顶层不再有 region/。
+      3. 其余 `dimensions/<ns>/<dim>/region` 里 .mca 最多的（世界只带了自定义
+         维度、没有主世界时兜底，至少能读到点东西）。
+
     找不到返回 (None, None, 0)。
     """
+    n = _count_mca(os.path.join(save_dir, 'region'))
+    if n:
+        return 'region', os.path.join(save_dir, 'region'), n
+
+    primary = 'dimensions/minecraft/overworld/region'
+    n = _count_mca(os.path.join(save_dir, *primary.split('/')))
+    if n:
+        return primary, os.path.join(save_dir, *primary.split('/')), n
+
     best = None
-    for rel, path in _region_dir_candidates(save_dir):
-        try:
-            n = sum(1 for f in os.listdir(path) if f.lower().endswith('.mca'))
-        except OSError:
+    for rel in _region_dir_candidates(save_dir):
+        if rel in ('region', primary):
             continue
-        if not n:
-            continue
-        key = (n, rel == 'region')
-        if best is None or key > best[0]:
-            best = (key, rel, path, n)
+        m = _count_mca(os.path.join(save_dir, *rel.split('/')))
+        if m and (best is None or m > best[2]):
+            best = (rel, os.path.join(save_dir, *rel.split('/')), m)
     if best is None:
         return None, None, 0
-    return best[1], best[2], best[3]
+    return best
 
 
 def _region_stats(save_dir, rdir=None):
@@ -534,13 +553,20 @@ def _cluster_bounds(pairs, gap=8):
     return bounds, dropped
 
 
-def _archives_of(world):
-    """列出世界里除主世界之外还带着哪些维度（老布局 DIM1/DIM-1，新布局 dimensions/…）。"""
-    out = [a for a in ('DIM-1', 'DIM1') if os.path.isdir(os.path.join(world, a))]
+def _archives_of(world, main_rel=None):
+    """列出世界里除主世界之外**真的带区块**的维度。
+
+    只列有 .mca 的：老布局的 `DIM-1/`、`DIM1/`，数据包维度 `dimensions/<ns>/<dim>/`。
+    主世界自己（main_rel）不算额外维度 —— 26.x 里主世界就在 dimensions 下面，
+    不排掉的话卡片上会写着「还带着 overworld」这种废话。
+    """
+    out = []
+    for a in ('DIM-1', 'DIM1'):
+        if _count_mca(os.path.join(world, a, 'region')):
+            out.append(a)
+    extra = []
     dims_root = os.path.join(world, 'dimensions')
     if os.path.isdir(dims_root):
-        if 'dimensions' not in out:
-            out.append('dimensions')
         try:
             namespaces = sorted(os.listdir(dims_root))
         except OSError:
@@ -554,8 +580,14 @@ def _archives_of(world):
             except OSError:
                 continue
             for dm in dims:
-                if os.path.isdir(os.path.join(ns_dir, dm, 'region')):
-                    out.append('dimensions/%s/%s' % (ns, dm))
+                rel = 'dimensions/%s/%s' % (ns, dm)
+                if rel == main_rel:
+                    continue
+                if _count_mca(os.path.join(ns_dir, dm, 'region')):
+                    extra.append(rel)
+    if extra:
+        out.append('dimensions')
+        out.extend(extra)
     return out
 
 
@@ -939,7 +971,7 @@ def import_zip(zip_path, name=None, root=None, sha256=None, source_filename=None
             'bounds': bounds,
             'regionCount': regions,
             'regionRel': region_rel or 'region',
-            'archives': _archives_of(world),
+            'archives': _archives_of(world, region_rel),
             'thumb': thumb if has_thumb else None,
             'area': area,
             'files': files,
@@ -1002,7 +1034,8 @@ def _emit(obj, as_json):
         return 0 if obj.get('ok') else 1
     if obj.get('ok'):
         data = obj.get('data')
-        if isinstance(data, dict) and 'maps' in data:
+        # doctor 的 data['maps'] 是「张数」（int），别把它当列表去遍历
+        if isinstance(data, dict) and isinstance(data.get('maps'), list):
             print('地图库：%s（%d 张）' % (data.get('root'), len(data['maps'])))
             for m in data['maps']:
                 flag = '*' if m.get('id') == data.get('defaultId') else ' '

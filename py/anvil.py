@@ -311,20 +311,32 @@ def _region_rel_candidates(save_dir):
 
 
 def _find_region_rel(save_dir):
-    """找 .mca 最多的那个候选 region 目录（主世界）。找不到返回 None。"""
-    best = None
-    for rel in _region_rel_candidates(save_dir):
+    """按布局判断主世界的 region 相对路径（与 maplib.find_region_dir 同一套规则）。
+
+    1. `<save>/region` 有 .mca → 经典布局的主世界（数据包维度再多也不是它）
+    2. `<save>/dimensions/minecraft/overworld/region` → 26.x 新布局
+    3. 其余 dimensions 里 .mca 最多的（只带自定义维度的存档兜底）
+    """
+    def count(rel):
         p = os.path.join(save_dir, *rel.split('/'))
         try:
-            n = sum(1 for f in os.listdir(p) if f.lower().endswith('.mca'))
+            return sum(1 for f in os.listdir(p) if f.lower().endswith('.mca'))
         except OSError:
+            return 0
+
+    if count('region'):
+        return 'region'
+    primary = 'dimensions/minecraft/overworld/region'
+    if count(primary):
+        return primary
+    best = None
+    for rel in _region_rel_candidates(save_dir):
+        if rel in ('region', primary):
             continue
-        if not n:
-            continue
-        key = (n, rel == 'region')
-        if best is None or key > best[0]:
-            best = (key, rel)
-    return best[1] if best else None
+        n = count(rel)
+        if n and (best is None or n > best[1]):
+            best = (rel, n)
+    return best[0] if best else None
 
 
 class World:

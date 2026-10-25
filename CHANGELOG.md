@@ -6,6 +6,40 @@
 
 ---
 
+## [0.4.6] - 2026-10-25
+
+发布前的最后一轮排错：把「主世界到底是哪个 region 目录」的判断从「谁的文件多」
+改成「看布局」，顺手修掉 `mc map doctor` 必崩和 `archives` 谎报维度。
+
+### 修复
+
+- **主世界 region 按布局判断，不再按文件数猜**（`py/maplib.py` 的
+  `find_region_dir()`、`py/anvil.py` 的 `_find_region_rel()`）：`<存档>/region`
+  里有 `.mca` 就一定是经典布局（1.21.x 及更早）的主世界；只有它不存在时才用
+  26.x 的 `dimensions/minecraft/overworld/region`；再退一步才去别处挑最多的。
+  之前是「所有候选里 `.mca` 最多的赢」，而整合包存档带的数据包维度（「方可梦世界」
+  有 4 个：`cobblesafari` ×3、`rad_gyms`）只要被探索得比主世界深，就会顶掉真正
+  的主世界 —— `bounds`、推荐机位、`regionCount` 全跟着错。导入与出图现在共用
+  这一套规则，不会再各挑一个目录。
+- **`archives` 只列真的有区块的维度**（`py/maplib.py` 的 `_archives_of()`）：
+  以前只看目录在不在，于是空的 `DIM-1/`、`DIM1/` 也被算进去（「鉴于王国整合包
+  地图1」卡片写着带下界末地，实际一个 region 文件都没有）；26.x 更离谱，会把
+  主世界自己（`dimensions/minecraft/overworld`）列成「额外维度」。现在按 `.mca`
+  计数，并排除主世界自己。
+- **`mc map doctor` 一跑就崩**（`py/maplib.py` 的 `_emit()`）：doctor 返回的
+  `data['maps']` 是「地图张数」（int），而终端美化输出把它当列表去 `len()` +
+  遍历，直接 `TypeError: object of type 'int' has no len()`，doctor 等于不可用。
+  现在只在它确实是列表时才美化，否则原样打印 JSON。
+
+### 说明
+
+`regionRel` 与 `archives` 是导入时写进 `meta.json` 的快照，这次改的是识别规则，
+所以**库里已有的地图不会自动刷新**这两个字段（不影响读档、扫描、出图，它们每次都
+现算）。想要字段也跟着更新，重新导入一次同一个 zip 即可（同 sha256 会被判重复，
+先删掉旧条目）。
+
+---
+
 ## [0.4.5] - 2026-10-25
 
 **Minecraft 26.x 的存档现在能认了**：新版本把主世界挪进了
