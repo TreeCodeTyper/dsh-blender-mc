@@ -371,8 +371,9 @@ def _explain_no_save(info):
         return ('zip 里还套着 %s —— 先把外层解开，再把里面那个存档压缩包拖进来'
                 % '、'.join(info['nestedZips']))
     if info['levelDats']:
-        return ('解压后 %s 里有 level.dat，但同层没有 region/*.mca（只压了世界的一部分，'
-                '要把整个世界文件夹一起压）' % '、'.join(info['levelDats'][:3]))
+        return ('解压后 %s 里有 level.dat，但同层没有 region/*.mca、也没有 '
+                'dimensions/*/*/region（只压了世界的一部分，要把整个世界文件夹一起压）'
+                % '、'.join(info['levelDats'][:3]))
     if info['mca']:
         return ('解压出 %d 个 .mca 区域文件，但一个 level.dat 都没有 —— 选中的是 region/ '
                 '那一层；要往上一级，把含 level.dat 的世界文件夹整体压进来' % info['mca'])
@@ -409,9 +410,74 @@ def _log_upload(root, record):
 
 # ------------------------------------------------------------------ 存档识别
 
-def _region_stats(save_dir):
-    """返回 (region 文件数, bounds, region 列表)。"""
-    rdir = os.path.join(save_dir, 'region')
+def _region_dir_candidates(save_dir):
+    """按优先级产出 (相对 save_dir 的路径, 绝对路径) 的候选 region 目录。
+
+    Minecraft 有两套世界布局：
+      · 经典（≤1.21.x）：<save>/region/r.X.Z.mca
+      · 26.x 起的新布局：主世界在 <save>/dimensions/minecraft/overworld/region/
+        （下界 the_nether、末地 the_end 同理，顶层没有 region/ 了）
+    老代码只认第一种，所以 26.x 的存档会被判成「有 level.dat 但没有 region」。
+    """
+    yield 'region', os.path.join(save_dir, 'region')
+    dims_root = os.path.join(save_dir, 'dimensions')
+    if not os.path.isdir(dims_root):
+        return
+    try:
+        namespaces = sorted(os.listdir(dims_root))
+    except OSError:
+        return
+    # minecraft 命名空间优先；同一命名空间里主世界排在最前面
+    namespaces = (['minecraft'] if 'minecraft' in namespaces else []) + \
+                 [n for n in namespaces if n != 'minecraft']
+    order = ('overworld', 'the_nether', 'the_end')
+    for ns in namespaces:
+        ns_dir = os.path.join(dims_root, ns)
+        if not os.path.isdir(ns_dir):
+            continue
+        try:
+            dims = sorted(os.listdir(ns_dir))
+        except OSError:
+            continue
+        dims = [d for d in order if d in dims] + [d for d in dims if d not in order]
+        for dm in dims:
+            yield ('dimensions/%s/%s/region' % (ns, dm),
+                   os.path.join(ns_dir, dm, 'region'))
+
+
+def find_region_dir(save_dir):
+    """找主世界的 region 目录 → (相对路径, 绝对路径, .mca 数)。
+
+    经典 <save>/region 优先；没有再认 26.x 的 dimensions/<ns>/<dim>/region。
+    多个候选都存在时取 .mca 最多的那个（主世界通常比下界/末地大得多）。
+    找不到返回 (None, None, 0)。
+    """
+    best = None
+    for rel, path in _region_dir_candidates(save_dir):
+        try:
+            n = sum(1 for f in os.listdir(path) if f.lower().endswith('.mca'))
+        except OSError:
+            continue
+        if not n:
+            continue
+        key = (n, rel == 'region')
+        if best is None or key > best[0]:
+            best = (key, rel, path, n)
+    if best is None:
+        return None, None, 0
+    return best[1], best[2], best[3]
+
+
+def _region_stats(save_dir, rdir=None):
+    """返回 (region 文件数, bounds, region 列表)。
+
+    rdir 不给就自己找，兼容经典布局与 26.x 的 dimensions/ 布局（见
+    _region_dir_candidates）。
+    """
+    if rdir is None:
+        _, rdir, _ = find_region_dir(save_dir)
+    if not rdir:
+        return 0, None, []
     xs, zs = [], []
     n = 0
     try:
@@ -466,6 +532,31 @@ def _cluster_bounds(pairs, gap=8):
     }
     dropped = len(pts) - len(best)
     return bounds, dropped
+
+
+def _archives_of(world):
+    """列出世界里除主世界之外还带着哪些维度（老布局 DIM1/DIM-1，新布局 dimensions/…）。"""
+    out = [a for a in ('DIM-1', 'DIM1') if os.path.isdir(os.path.join(world, a))]
+    dims_root = os.path.join(world, 'dimensions')
+    if os.path.isdir(dims_root):
+        if 'dimensions' not in out:
+            out.append('dimensions')
+        try:
+            namespaces = sorted(os.listdir(dims_root))
+        except OSError:
+            namespaces = []
+        for ns in namespaces:
+            ns_dir = os.path.join(dims_root, ns)
+            if not os.path.isdir(ns_dir):
+                continue
+            try:
+                dims = sorted(os.listdir(ns_dir))
+            except OSError:
+                continue
+            for dm in dims:
+                if os.path.isdir(os.path.join(ns_dir, dm, 'region')):
+                    out.append('dimensions/%s/%s' % (ns, dm))
+    return out
 
 
 def _score_save(path, rel):
@@ -555,8 +646,9 @@ def read_level_dat(save_dir, limits=None):
         sp = data.get('SpawnPos')
         if isinstance(sp, list) and len(sp) >= 3 and all(isinstance(v, (int, float)) for v in sp[:3]):
             cand = sp[:3]
-        elif isinstance(data.get('Spawn'), dict):
-            pos = data['Spawn'].get('pos')
+        elif isinstance(data.get('Spawn') or data.get('spawn'), dict):
+            sd = data.get('Spawn') if isinstance(data.get('Spawn'), dict) else data['spawn']
+            pos = sd.get('pos') or sd.get('Pos')
             if isinstance(pos, list) and len(pos) >= 3:
                 cand = pos[:3]
         if cand:
@@ -792,7 +884,8 @@ def import_zip(zip_path, name=None, root=None, sha256=None, source_filename=None
             warnings.append('选中的目录名字像备份，可能不是最新的那个存档')
 
         save_dir = best['path']
-        regions, bounds, _ = _region_stats(save_dir)
+        region_rel, region_abs, _ = find_region_dir(save_dir)
+        regions, bounds, _ = _region_stats(save_dir, region_abs)
         if regions == 0:
             raise MapError('save.no-region', '存档里一个 region 文件都没有，像是空世界')
 
@@ -845,8 +938,8 @@ def import_zip(zip_path, name=None, root=None, sha256=None, source_filename=None
             'spawn': spawn,
             'bounds': bounds,
             'regionCount': regions,
-            'archives': [a for a in ('DIM-1', 'DIM1', 'dimensions')
-                         if os.path.isdir(os.path.join(world, a))],
+            'regionRel': region_rel or 'region',
+            'archives': _archives_of(world),
             'thumb': thumb if has_thumb else None,
             'area': area,
             'files': files,
@@ -861,7 +954,7 @@ def import_zip(zip_path, name=None, root=None, sha256=None, source_filename=None
         _log_upload(root, {'result': 'ok', 'id': map_id, 'name': clean_name,
                            'zip': meta['sourceFilename'], 'size': size,
                            'levelName': meta['levelName'], 'mcVersion': meta['mcVersion'],
-                           'regionCount': regions, 'files': files,
+                           'regionCount': regions, 'regionRel': region_rel, 'files': files,
                            'warnings': warnings})
         return dto(meta)
     except MapError as exc:
@@ -893,6 +986,9 @@ def doctor(root=None):
             out['problems'].append('%s 的存档目录不见了：%s' % (mid, p))
         elif not _level_dat_in(p):
             out['problems'].append('%s 的存档缺 level.dat' % mid)
+        elif not find_region_dir(p)[1]:
+            out['problems'].append('%s 的存档里找不到主世界 region 目录（经典 region/ 与 '
+                                   'dimensions/*/*/region 都没有）' % mid)
     return out
 
 

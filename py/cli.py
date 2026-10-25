@@ -87,9 +87,14 @@ def _need_save(save):
         print('   上传过的地图可以先用: python py/cli.py map list')
         print('   或指定: python py/cli.py map resolve --id <id> --json')
         return False
-    if not os.path.isdir(os.path.join(save, 'region')):
-        print('❌ 这个目录里没有 region/，不像是存档根目录: %s' % save)
-        print('   要选到含 level.dat 和 region/ 的那一层（整合包 zip 里常多套一层文件夹）')
+    try:
+        import maplib
+        rel = maplib.find_region_dir(save)[0]
+    except Exception:  # noqa: BLE001 —— 别为了个提示把 CLI 弄崩
+        rel = 'region' if os.path.isdir(os.path.join(save, 'region')) else None
+    if not rel:
+        print('❌ 这个目录里找不到 region/，也不像 26.x 的 dimensions/ 布局: %s' % save)
+        print('   要选到含 level.dat 的那一层（经典布局里就是含 region/ 的那一层）')
         return False
     return True
 

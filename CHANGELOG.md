@@ -6,6 +6,43 @@
 
 ---
 
+## [0.4.5] - 2026-10-25
+
+**Minecraft 26.x 的存档现在能认了**：新版本把主世界挪进了
+`dimensions/minecraft/overworld/region/`，顶层不再有 `region/`，旧代码只认
+`<存档>/region`，于是 26.3 的世界被判成「有 level.dat 但没有 region」。
+方块调色板的格式也一起变了，光认目录不改调色板的话，入库了也出不了图。
+
+### 修复
+
+- **认 26.x 的新世界布局**（`py/maplib.py`）：新增 `_region_dir_candidates()` /
+  `find_region_dir()`，按「经典 `<存档>/region` → `dimensions/<命名空间>/<维度>/region`」
+  的顺序找主世界 region，多个候选取 `.mca` 最多的那个；`_region_stats()` 改为
+  用它们定位，`bounds` / `regionCount` / 推荐机位全部跟着对。
+  meta 新增 `regionRel` 记录实际用的相对路径，`archives` 也列出了新布局下的维度目录。
+- **导出/扫描侧同样认新布局**（`py/anvil.py`）：`World` 自己找 region 目录
+  （`_find_region_rel()`），下界/末地同时支持 `dimensions/minecraft/the_nether`
+  与老的 `DIM-1`；`py/cli.py` 的存档校验同步放宽。
+- **认 26.x 的方块调色板**（`py/anvil.py`）：26.x 的 `palette` 条目可以是纯字符串
+  `"minecraft:stone"`，也可以是 `{"id": ..., "properties": {...}}`（老版本是
+  `{"Name": ..., "Properties": {...}}`）。新增 `_pal_name()` / `_pal_props()`
+  三种形态全认 —— 不改这里，`mc_scan` / `mc_shoot` 会在第一个区块上抛
+  `AttributeError: 'str' object has no attribute 'get'`。
+- **`level.dat` 的小写字段**（`py/maplib.py`）：26.x 把 `Spawn` 写成 `spawn`，
+  出生点解析同时认两者，否则推荐机位只能退回包围盒中心。
+- **玩家数据换位置**（`py/anvil.py`）：26.x 起在 `players/data/<uuid>.dat`，
+  `read_player()` 同时找老的 `playerdata/`，字段名也大小写都认。
+
+### 说明
+
+- 实测对象：`E:\游戏与自媒体\安装包\我的世界\地图.3.zip`（14 MB，69 条目，
+  主世界 region 在 `新的世界/dimensions/minecraft/overworld/region/`）。
+  导入结果：版本 26.3、dataVersion 5023、6 个 region、
+  `regionRel = dimensions/minecraft/overworld/region`、出生点 (-32, 79, 32)、
+  读回玩家上次位置 (-168.8, 64, 19.5)；`py/cli.py scan` 在这份存档上正常
+  找到 3 个机位（开阔度 0.90~0.92）。
+- 老布局（≤1.21.x）行为不变：`<存档>/region` 仍然优先。
+
 ## [0.4.4] - 2026-10-25
 
 「上传之后认不出文件」——现在会把 zip 里到底装了什么直接说出来。

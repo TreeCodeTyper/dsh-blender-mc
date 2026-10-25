@@ -161,18 +161,52 @@ class Region:
         return parse_nbt(payload)
 
 
+def _pal_name(entry):
+    """方块调色板条目的方块名。
+
+    ≤1.21.x 的条目是 {'Name': 'minecraft:stone', 'Properties': {...}}；
+    26.x 起变成两种形式：直接是字符串 'minecraft:stone'，或者
+    {'id': 'minecraft:stone', 'properties': {...}}（老存档混进来时还可能
+    是 {'': 'minecraft:stone'} 这种无名键），三种都得认。
+    """
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        for k in ('Name', 'id', 'name', ''):
+            v = entry.get(k)
+            if isinstance(v, str) and v:
+                return v
+    return 'minecraft:air'
+
+
+def _pal_props(entry):
+    """方块状态（半砖 type=top、楼梯 facing 之类）。没有就返回空字典。"""
+    if isinstance(entry, dict):
+        for k in ('Properties', 'properties'):
+            v = entry.get(k)
+            if isinstance(v, dict):
+                return v
+    return {}
+
+
 def read_player(save_dir):
     """读取玩家数据（位置/朝向/维度/背包）。
 
-    playerdata/<uuid>.dat 是 gzip 压缩的 NBT。这里能拿到玩家【上次下线的
+    playerdata/<uuid>.dat 是 gzip 压缩的 NBT（26.x 起挪到了
+    players/data/<uuid>.dat）。这里能拿到玩家【上次下线的
     真实坐标与朝向】—— 把角色放回世界地图里时就该站在这个位置。
 
     返回值: dict(pos, yaw, pitch, dimension, health, food, gamemode, inventory)
             没有玩家数据时返回 None
     """
     import gzip
-    pd = os.path.join(save_dir, 'playerdata')
-    if not os.path.isdir(pd):
+    pd = None
+    for cand in (os.path.join(save_dir, 'playerdata'),
+                 os.path.join(save_dir, 'players', 'data')):
+        if os.path.isdir(cand):
+            pd = cand
+            break
+    if not pd:
         return None
     files = [f for f in os.listdir(pd) if f.endswith('.dat')]
     if not files:
@@ -190,22 +224,24 @@ def read_player(save_dir):
         except Exception:
             data = raw
     nbt = parse_nbt(data)
-    pos = nbt.get('Pos') or [0, 64, 0]
-    rot = nbt.get('Rotation') or [0, 0]
+    # 26.x 的字段名是小写的，两种都试
+    pos = nbt.get('Pos') or nbt.get('pos') or [0, 64, 0]
+    rot = nbt.get('Rotation') or nbt.get('rotation') or [0, 0]
     inv = []
-    for it in (nbt.get('Inventory') or []):
+    for it in (nbt.get('Inventory') or nbt.get('inventory') or []):
         if isinstance(it, dict):
-            inv.append({'slot': it.get('Slot'), 'id': it.get('id'),
+            inv.append({'slot': it.get('Slot', it.get('slot')),
+                        'id': it.get('id', it.get('Id')),
                         'count': it.get('count', it.get('Count', 1))})
     return {
         'file': files[0],
         'pos': (float(pos[0]), float(pos[1]), float(pos[2])),
         'yaw': float(rot[0]),
         'pitch': float(rot[1]) if len(rot) > 1 else 0.0,
-        'dimension': nbt.get('Dimension', 'minecraft:overworld'),
-        'health': nbt.get('Health'),
-        'food': nbt.get('foodLevel'),
-        'gamemode': nbt.get('playerGameType'),
+        'dimension': nbt.get('Dimension', nbt.get('dimension', 'minecraft:overworld')),
+        'health': nbt.get('Health', nbt.get('health')),
+        'food': nbt.get('foodLevel', nbt.get('food_level')),
+        'gamemode': nbt.get('playerGameType', nbt.get('player_game_type')),
         'inventory': inv,
     }
 
@@ -247,21 +283,79 @@ def _unpack_blocks(longs, palette_size, count=4096):
     return out
 
 
+def _region_rel_candidates(save_dir):
+    """候选 region 相对路径：经典 <save>/region 优先，其次 26.x 的
+    <save>/dimensions/<ns>/<dim>/region（这时顶层没有 region/）。"""
+    yield 'region'
+    dims_root = os.path.join(save_dir, 'dimensions')
+    if not os.path.isdir(dims_root):
+        return
+    try:
+        namespaces = sorted(os.listdir(dims_root))
+    except OSError:
+        return
+    namespaces = (['minecraft'] if 'minecraft' in namespaces else []) + \
+                 [n for n in namespaces if n != 'minecraft']
+    order = ('overworld', 'the_nether', 'the_end')
+    for ns in namespaces:
+        ns_dir = os.path.join(dims_root, ns)
+        if not os.path.isdir(ns_dir):
+            continue
+        try:
+            dims = sorted(os.listdir(ns_dir))
+        except OSError:
+            continue
+        dims = [d for d in order if d in dims] + [d for d in dims if d not in order]
+        for dm in dims:
+            yield 'dimensions/%s/%s/region' % (ns, dm)
+
+
+def _find_region_rel(save_dir):
+    """找 .mca 最多的那个候选 region 目录（主世界）。找不到返回 None。"""
+    best = None
+    for rel in _region_rel_candidates(save_dir):
+        p = os.path.join(save_dir, *rel.split('/'))
+        try:
+            n = sum(1 for f in os.listdir(p) if f.lower().endswith('.mca'))
+        except OSError:
+            continue
+        if not n:
+            continue
+        key = (n, rel == 'region')
+        if best is None or key > best[0]:
+            best = (key, rel)
+    return best[1] if best else None
+
+
 class World:
-    def __init__(self, save_dir):
+    def __init__(self, save_dir, region_rel=None):
         self.dir = save_dir
-        self.region_dir = os.path.join(save_dir, 'region')
-        if not os.path.isdir(self.region_dir):
-            raise FileNotFoundError('找不到 region 目录: %s' % self.region_dir)
+        rel = region_rel or _find_region_rel(save_dir)
+        if not rel:
+            raise FileNotFoundError(
+                '找不到 region 目录（经典 region/ 与 dimensions/*/*/region 都不存在）: %s'
+                % save_dir)
+        self.region_rel = rel
+        self.region_dir = os.path.join(save_dir, *rel.split('/'))
 
     def region_files(self, dim='overworld'):
-        if dim == 'overworld':
+        if dim in ('overworld', '', None):
             d = self.region_dir
-        else:
-            d = os.path.join(self.dir, dim, 'region')
-        if not os.path.isdir(d):
-            return []
-        return [os.path.join(d, f) for f in sorted(os.listdir(d)) if f.endswith('.mca')]
+            if not os.path.isdir(d):
+                return []
+            return [os.path.join(d, f) for f in sorted(os.listdir(d))
+                    if f.endswith('.mca')]
+        # 其它维度：26.x 在 dimensions/minecraft/<dim>/region，老布局在 <大洲码>/region
+        alias = {'the_nether': 'DIM-1', 'the_end': 'DIM1',
+                 'DIM-1': 'the_nether', 'DIM1': 'the_end'}
+        names = [dim] + ([alias[dim]] if dim in alias else [])
+        for nm in names:
+            for d in (os.path.join(self.dir, 'dimensions', 'minecraft', nm, 'region'),
+                      os.path.join(self.dir, nm, 'region')):
+                if os.path.isdir(d):
+                    return [os.path.join(d, f) for f in sorted(os.listdir(d))
+                            if f.endswith('.mca')]
+        return []
 
     def iter_blocks(self, x0=-64, x1=64, z0=-64, z1=64, y0=0, y1=320,
                     skip_air=True, dim='overworld', limit=None, on_progress=None,
@@ -305,8 +399,8 @@ class World:
                     bs = sec.get('block_states')
                     if not bs:
                         continue
-                    pal = [p.get('Name', 'minecraft:air') for p in bs.get('palette', [])]
-                    props = [p.get('Properties') or {} for p in bs.get('palette', [])]
+                    pal = [_pal_name(p) for p in bs.get('palette', [])]
+                    props = [_pal_props(p) for p in bs.get('palette', [])]
                     if not pal:
                         continue
                     data = bs.get('data')
