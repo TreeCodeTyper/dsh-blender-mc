@@ -6,6 +6,43 @@
 
 ---
 
+## [0.4.4] - 2026-10-25
+
+「上传之后认不出文件」——现在会把 zip 里到底装了什么直接说出来。
+
+0.4.3 修掉 Content-Length 之后，字节能顺利到 Python 了，但剩下的 `save.not-found`
+只有一句「要选到含 level.dat 和 region/ 的那一层」：用户拖进来的到底是
+「整合包本体」、还是「只压了 region/ 那一层」、还是「zip 里还套着 zip」，
+面板一个字都不说，只能对着「没找到存档」发呆。
+
+### 修复
+
+- **`save.not-found` 讲清原因**（`py/maplib.py`）：新增 `_scan_unpack()` 与
+  `_explain_no_save()`，解压后数一遍顶层目录、`.mca` 数量、`level.dat` 位置、
+  里面套着的 zip，然后分四种情况给具体建议：
+  顶层是 `mods/`、`config/` → 这是整合包本体，进 `saves/` 把世界文件夹单独压一次；
+  只有 `.mca` 没有 `level.dat` → 压到了 `region/` 那一层，要往上一级；
+  zip 里套着 zip → 先把外层解开；其余情况把顶层条目列出来。
+  详情同时放进 `params.detail`，面板中英文模板改成 `{detail}` 直接显示。
+- **`LEVEL.DAT` 也能认**（大小写不敏感）：新增 `_level_dat_in()`，替换掉
+  `os.path.join(dir, 'level.dat')` 的精确匹配，`find_saves()` / `_score_save()` /
+  `read_level_dat()` / `doctor()` 全部改用它 —— 从 Linux、macOS 打包过来的整合包
+  常把文件存成大写，旧代码会一个存档都找不到。
+- **上传过程留痕**：新增 `<库根>/logs/upload.log`，每次导入成功或失败各记一行
+  JSON（文件名、大小、sha256、错误码、扫出来的 zip 内容、成功时的版本与 region 数），
+  超过 1 MiB 自动轮转成 `.1`。以前失败连痕迹都没有，只能靠用户截图猜。
+
+### 说明
+
+- 这一版改的是 `py/maplib.py` + 面板文案：**Python 侧不用重启 DSH**（每次导入都
+  新起一个 python 子进程，读的就是磁盘上的文件），只有 `lib/*.js` 的改动才需要
+  完全退出 DSH 再打开；面板文案改动刷新页面即可。
+- 造了五种 zip 结构做回归（`_scratch/dsh-mc-upload/zipcase.py`）：整合包本体、
+  只有 `region/`、套娃 zip、大写 `LEVEL.DAT`、正常存档 —— 前三种现在直接说出
+  原因，大写 `LEVEL.DAT` 从「找不到存档」变成正常入库。
+
+---
+
 ## [0.4.3] - 2026-10-24
 
 面板上传大 zip 报「浏览器没报文件大小（Content-Length 缺失）」—— 真凶找到了。

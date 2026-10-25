@@ -315,6 +315,98 @@ def _extract_zip(zip_path, dest, limits, on_stage=None):
     return count, total, names
 
 
+# ------------------------------------------------------------------ 诊断
+
+MODPACK_MARKERS = ('mods', 'config', 'defaultconfigs', 'kubejs', 'overrides',
+                   'manifest.json', 'minecraftinstance.json', 'instance.cfg')
+
+
+def _level_dat_in(path):
+    """返回 path 里 level.dat 的实际路径（大小写不敏感）。
+
+    从 Linux / macOS 打包过来的整合包会把文件存成 LEVEL.DAT，Windows 解压后
+    大小写原样保留；旧代码按 'level.dat' 精确匹配，于是「一个存档都找不到」。
+    """
+    try:
+        for nm in os.listdir(path):
+            if nm.lower() == 'level.dat':
+                p = os.path.join(path, nm)
+                if os.path.isfile(p):
+                    return p
+    except OSError:
+        return None
+    return None
+
+
+def _scan_unpack(unpack):
+    """数一数解压出来的东西，用来解释「为什么没找到存档」。"""
+    top, levels, nested = [], [], []
+    mca = 0
+    files = 0
+    for dirpath, dirnames, filenames in os.walk(unpack):
+        rel = os.path.relpath(dirpath, unpack)
+        depth = 0 if rel == '.' else rel.count(os.sep) + 1
+        if depth > 6:
+            dirnames[:] = []
+            continue
+        if depth == 0:
+            top = sorted(dirnames)[:9]
+        for nm in filenames:
+            files += 1
+            low = nm.lower()
+            if low.endswith('.mca'):
+                mca += 1
+            elif low == 'level.dat':
+                levels.append('.' if rel == '.' else rel.replace(os.sep, '/'))
+            elif low.endswith('.zip'):
+                nested.append(nm)
+    return {'top': top, 'mca': mca, 'levelDats': levels[:6],
+            'nestedZips': nested[:3], 'files': files}
+
+
+def _explain_no_save(info):
+    """把「没找到存档」讲成人话：到底是压错了层、还是压成了整合包本体。"""
+    tops = '、'.join('%s/' % t for t in info['top'][:6]) if info['top'] else '（没有子目录）'
+    if info['nestedZips']:
+        return ('zip 里还套着 %s —— 先把外层解开，再把里面那个存档压缩包拖进来'
+                % '、'.join(info['nestedZips']))
+    if info['levelDats']:
+        return ('解压后 %s 里有 level.dat，但同层没有 region/*.mca（只压了世界的一部分，'
+                '要把整个世界文件夹一起压）' % '、'.join(info['levelDats'][:3]))
+    if info['mca']:
+        return ('解压出 %d 个 .mca 区域文件，但一个 level.dat 都没有 —— 选中的是 region/ '
+                '那一层；要往上一级，把含 level.dat 的世界文件夹整体压进来' % info['mca'])
+    marks = [m for m in MODPACK_MARKERS if any(t.lower() == m for t in info['top'])]
+    if marks:
+        return ('顶层是 %s，这是整合包本体、里面不含存档；请进整合包打开 saves/，'
+                '把世界文件夹单独压一次再上传' % tops)
+    if info['files'] == 0:
+        return '解压后一个文件都没有（zip 是空的，或者只有空目录）'
+    return '解压出 %d 个文件，顶层是 %s，都没有 level.dat + region/*.mca' % (info['files'], tops)
+
+
+def _log_upload(root, record):
+    """把每次导入的结果记一行 JSON 到 <root>/logs/upload.log（超过 1 MiB 轮转）。
+
+    以前失败没有任何痕迹，只能靠用户截图猜；现在出问题直接看这一行。
+    """
+    try:
+        d = os.path.join(root, 'logs')
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, 'upload.log')
+        try:
+            if os.path.getsize(p) > MIB:
+                os.replace(p, p + '.1')
+        except OSError:
+            pass
+        rec = dict(record)
+        rec['at'] = time.strftime('%Y-%m-%d %H:%M:%S')
+        with open(p, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + '\n')
+    except Exception:  # noqa: BLE001 —— 日志失败绝不能影响上传
+        pass
+
+
 # ------------------------------------------------------------------ 存档识别
 
 def _region_stats(save_dir):
@@ -390,7 +482,7 @@ def _score_save(path, rel):
             score += pts
     if os.path.isfile(os.path.join(path, 'icon.png')):
         score += 5
-    if os.path.isfile(os.path.join(path, 'level.dat')):
+    if _level_dat_in(path):
         score += 10
     if any(w in low for w in BACKUP_WORDS):
         score -= 40
@@ -406,7 +498,7 @@ def find_saves(root):
         # 剪枝：整合包里的 mods/datapacks 子树不可能藏着玩家的主世界
         dirnames[:] = [d for d in dirnames
                        if d.lower() not in ('mods', 'resourcepacks', 'shaderpacks', '.git')]
-        if 'level.dat' not in filenames:
+        if not any(f.lower() == 'level.dat' for f in filenames):
             continue
         rel = os.path.relpath(dirpath, root).replace('\\', '/')
         if rel == '.':
@@ -422,7 +514,8 @@ def find_saves(root):
 def read_level_dat(save_dir, limits=None):
     """读 level.dat（gzip+NBT）：版本、名字、出生点、上次游玩时间。"""
     limits = limits or DEFAULTS
-    p = os.path.join(save_dir, 'level.dat')
+    # 大小写不敏感：LEVEL.DAT 也要读（Linux/macOS 打包来的整合包常见）
+    p = _level_dat_in(save_dir) or os.path.join(save_dir, 'level.dat')
     info = {'levelName': None, 'mcVersion': None, 'dataVersion': None,
             'spawn': None, 'lastPlayed': None, 'hardcore': False}
     try:
@@ -678,6 +771,7 @@ def import_zip(zip_path, name=None, root=None, sha256=None, source_filename=None
     unpack = os.path.join(work, 'unpack')
     os.makedirs(unpack, exist_ok=True)
     warnings = []
+    diag = {}
     try:
         files, unpacked, _ = _extract_zip(zip_path, unpack, limits)
         if files == 0:
@@ -685,10 +779,11 @@ def import_zip(zip_path, name=None, root=None, sha256=None, source_filename=None
 
         saves = find_saves(unpack)
         if not saves:
-            raise MapError(
-                'save.not-found',
-                'zip 里没找到 Minecraft 存档（需要包含 level.dat 和 region/*.mca）。'
-                '请上传世界文件夹或包含世界文件夹的整合包压缩包。')
+            # 不猜了：把解压出来的东西数一遍，直接告诉用户压错了哪一层。
+            diag.update(_scan_unpack(unpack))
+            detail = _explain_no_save(diag)
+            raise MapError('save.not-found', 'zip 里没找到 Minecraft 存档：%s' % detail,
+                           params={'detail': detail})
         best = saves[0]
         if len(saves) > 1:
             warnings.append('zip 里有 %d 个存档，已选「%s」' % (len(saves), best['rel']))
@@ -763,7 +858,18 @@ def import_zip(zip_path, name=None, root=None, sha256=None, source_filename=None
         if not idx.get('defaultId'):
             idx['defaultId'] = map_id
         _write_json(index_path(root), idx)
+        _log_upload(root, {'result': 'ok', 'id': map_id, 'name': clean_name,
+                           'zip': meta['sourceFilename'], 'size': size,
+                           'levelName': meta['levelName'], 'mcVersion': meta['mcVersion'],
+                           'regionCount': regions, 'files': files,
+                           'warnings': warnings})
         return dto(meta)
+    except MapError as exc:
+        # 失败也留一行：文件名、大小、命中的错误码、以及扫出来的 zip 内容。
+        _log_upload(root, {'result': 'fail', 'code': exc.code, 'message': exc.message,
+                           'zip': source_filename or os.path.basename(zip_path),
+                           'size': size, 'sha256': sha, 'scan': diag or None})
+        raise
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -785,7 +891,7 @@ def doctor(root=None):
         p = meta.get('savePath')
         if not p or not os.path.isdir(p):
             out['problems'].append('%s 的存档目录不见了：%s' % (mid, p))
-        elif not os.path.isfile(os.path.join(p, 'level.dat')):
+        elif not _level_dat_in(p):
             out['problems'].append('%s 的存档缺 level.dat' % mid)
     return out
 
