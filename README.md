@@ -12,7 +12,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](py/)
 [![Blender](https://img.shields.io/badge/Blender-4.2%20LTS%20%7C%205.2%20LTS-orange.svg)](https://www.blender.org/)
 
-[快速开始](#快速开始) · [使用教程](docs/使用教程.md) · [工作原理](#工作原理) · [常见问题](#常见问题) · [参与贡献](CONTRIBUTING.md)
+[快速开始](#快速开始) · [使用教程](docs/使用教程.md) · [工作原理](#工作原理) · [常见问题](#常见问题) · [参与贡献](CONTRIBUTING.md) · **[交接文档（改代码前必读）](docs/交接.md)**
 
 </div>
 
@@ -403,14 +403,15 @@ python py/cli.py shoot "D:/saves/我的世界" --area -2100,-1600,-1400,-900 --o
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--yaw` | 25 | 角色朝向（度）。相机在 -Y，25° 是 3/4 侧脸面向镜头 |
-| `--cam-az` | 200 | 视线方位角（MC 角度） |
-| `--dist` | 11.2 | 相机距离 |
-| `--sky` | 0.03 | 天空强度。**用「标准」视图转换时必须 ≤0.05**，否则削顶成白 |
+| `--yaw` | 25 | 角色朝向的**初值**（度）。实际会按几何量测重定，目标是 3/4 侧脸面向镜头 |
+| `--cam-az` | 自动 | 视线方位角（MC 角度）。不给就按地形挑：地形仰角 ≤8° 的方位里，背后越空旷越优先；`DSH_MC_AUTO_AZ=0` 可关 |
+| `--dist` | 15 | 相机距离（方块）。14 以下主体会被裁切 |
+| `--sky` | 0.12 | 天空强度。默认走 AgX，不需要再为「标准」视图限幅 |
 | `--sink` | 0.06 | 脚陷入地面的深度。防止"看起来悬浮" |
-| `--view-transform` | Standard | `Standard` / `Filmic` / `AgX` |
+| `--view-transform` | AgX | `Standard` / `Filmic` / `AgX`；0.5.x 默认 AgX（有高光滚降，布光才显形） |
 | `--attempts` | 3 | 审图不达标时自动重渲几轮 |
 | `--target` | 85 | 目标分，达到就停 |
+| `--trees` | 12（工具）/ 0（CLI） | 背后种几棵原版形状的树。**需要 `vendor/textures` 或 MCprep 资源包**，缺贴图会整段跳过 |
 
 ---
 
@@ -434,30 +435,42 @@ python py/cli.py shoot "D:/saves/我的世界" --area -2100,-1600,-1400,-900 --o
 
 ```
 dsh-blender-mc/
-├── lib/index.js              DSH 插件外壳：注册 8 个工具，调 Python
+├── lib/
+│   ├── index.js              DSH 插件外壳：注册 9 个工具，调 Python
+│   ├── map-routes.js         设置页 HTTP 路由（地图/皮肤上传）
+│   ├── map-resolve.js        存档目录解析（region 版式 / 26.x dimensions 版式）
+│   └── shoot-params.js       设置页参数 → CLI 参数 / 环境变量
 ├── py/
-│   ├── cli.py                命令行入口
-│   ├── pipeline.py           ★ 编排 + 审图闭环 + auto_adjust
+│   ├── cli.py                命令行入口（doctor/setup/scan/shoot/anim/film/check/map/mobs/extract）
+│   ├── pipeline.py           ★ 编排 + 审图闭环 + auto_adjust + 子进程素材路径注入
 │   ├── film.py               ★ 分镜成片：多镜头 → 重编号 → 拼接 + 分镜表.md
-│   ├── vision_check.py       ★ OpenCV 审图
+│   ├── vision_check.py       ★ OpenCV 审图（朝向/接地/曝光/布光/构图/景深）
+│   ├── readiness.py          「装没装好」的廉价快照（设置页提示）
 │   ├── bedrock.py            Bedrock 几何（.geo.json）→ OBJ
 │   ├── extract.py            批量提取模型 + 猜贴图 + 写清单
+│   ├── mobs.py               MCprep 生物 rig 库（列/搜/生成进工程）
+│   ├── render_presets.py     渲染预设（B 站 1080p/4K、竖屏…）
 │   ├── model_spec.py         自带模型的入参解析（DSH_MODELS / DSH_MODEL1_*）
 │   ├── requirements.py       运行条件检查 + 安装指引
 │   ├── setup_assets.py       外部资产装配
 │   ├── scan.py               找机位
 │   ├── anvil.py              读 .mca（纯标准库，不需要 Blender）
-│   └── blender/
+│   └── blender/              ← 只在 Blender 里跑（bpy），不能 import cv2
 │       ├── _compat.py        ★ Blender 版本兼容层
 │       ├── export_obj.py     存档 → OBJ
-│       ├── build_cover.py    搭场景 + 渲染（含自带模型落位）
+│       ├── build_cover.py    ★ 封面主脚本：天空/雾/布光/相机/姿态/渲染
+│       ├── post_grade.py     ★ 合成器调色（0.5.0 起）：Bloom + 饱和 + 暗角
+│       ├── camera_kit.py     电影机位（分镜、运镜）
+│       ├── fx_kit.py         特效库（光环/剑尾/符阵…）
 │       ├── animate_aura.py   杀戮光环动画（老脚本）
 │       ├── animate_yujian.py 御剑飞天（转发壳 → presets/yujian.json）
 │       ├── animate_recipe.py ★ 通用驱动：读 JSON 配方 → anim_kit
 │       ├── anim_kit.py       ★ 动画内核：动作/武器/特效/相机/灯光/渲染
-│       └── presets/          ★ 动画配方（yujian.json / dash.json / README.md）
-├── docs/                     使用教程 / 自带模型 / 发布指南
-└── vendor/                   ← 装配出来的第三方资产（.gitignore 排除）
+│       └── presets/          ★ 动画配方（*.json + README）
+├── docs/                     使用教程 / 自带模型 / 交接（改代码必读）/ FIX_NOTES / NEW_PARAMS
+├── scripts/                  release.ps1 / install_to_profile.py / repair_profile.py / 自检脚本
+├── market/                   插件市场文案
+└── vendor/                   ← 装配出来的第三方资产（.gitignore 排除，绝不提交）
 ```
 
 ### 设计取舍
