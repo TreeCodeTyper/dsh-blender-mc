@@ -21,7 +21,7 @@ const ENTRY = resolve(HERE, '..', 'lib', 'index.js')
 
 /** 期望注册的工具名 —— 少一个就是坏了，多一个说明更新了这里 */
 const EXPECTED = ['mc_doctor', 'mc_setup', 'mc_extract_models', 'mc_scan',
-  'mc_shoot', 'mc_anim', 'mc_film', 'mc_check']
+  'mc_shoot', 'mc_anim', 'mc_film', 'mc_check', 'mc_mobs']
 
 let failed = 0
 const ok = (m) => console.log(`  \x1b[32m✓\x1b[0m ${m}`)
