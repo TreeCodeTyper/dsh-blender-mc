@@ -40,7 +40,7 @@ DEFAULTS = {
     'sky_strength': 0.12,
     'light_scale': 1.0,    # 三点布光的整体倍率（会经 DSH_KEY_SCALE 真正传给 Blender）
     'cam_az': 200.0,       # 视线方位角（MC 角度）
-    'dist': 17.0,          # ★ 配合 105mm：17 格 ≈ 主体占画高 60%，背景弥散才够
+    'dist': 15.0,          # ★ 配合 105mm：17 格 ≈ 主体占画高 60%，背景弥散才够
     'sink': 0.06,          # ★ 脚陷入地面的深度。精确贴面时间隙 0.019，
                            #   MC 方块边缘锐利，这点缝会读成"悬浮"
     'res': '1280x720',
@@ -283,6 +283,22 @@ def step_render(blender_exe, obj, out_dir, params, progress=print):
             str(params['sky_strength']), str(params['cam_az']), str(params['dist']),
             str(params['sink'])]
     env = dict(os.environ)
+    # ★★ 素材路径断链：resolve_assets() 的结果以前从来没进 Blender 的环境变量，
+    #   DSH_MC_TEXTURES 永远是空 → 树林整段跳过、方块物品只能画纯色；
+    #   DSH_MC_RIG / DSH_MC_ITEM_RIG / DSH_MC_FFMPEG 同理。这里一次性接上。
+    try:
+        _as = resolve_assets()
+        for _k, _env in (('textures', 'DSH_MC_TEXTURES'),
+                         ('rig', 'DSH_MC_RIG'),
+                         ('item', 'DSH_MC_ITEM_RIG'),
+                         ('ffmpeg', 'DSH_MC_FFMPEG')):
+            if _as.get(_k) and not env.get(_env):
+                env[_env] = str(_as[_k])
+        progress("    素材: " + " / ".join(
+            f"{_k}={'✓' if _as.get(_k) else '✗'}"
+            for _k in ('textures', 'rig', 'item', 'ffmpeg')))
+    except Exception as _e:
+        progress(f"    ⚠️ 素材路径解析失败: {type(_e).__name__}: {str(_e)[:60]}")
     res = str(params.get('res') or '').lower().replace('×', 'x')
     if 'x' in res:
         try:
@@ -297,6 +313,44 @@ def step_render(blender_exe, obj, out_dir, params, progress=print):
     env['DSH_KEY_SCALE'] = str(float(params.get('light_scale', 1.0)))
     # ★ P1-1 雾开关：默认开；调用方环境里已显式设了 DSH_MC_FOG 就尊重它
     env.setdefault('DSH_MC_FOG', '1')
+    # ★★ P0 断链修复：以下参数以前【只进了 params，从没传到 Blender】——
+    #   `--trees / --tree-dist / --tree-h / --hour / --fog / --clouds /
+    #    --items / --armor / --armor-color` 全部静默失效（实测 --trees 14
+    #    与不种树出图字节完全相同）。build_cover.py 只认下面这些 DSH_*。
+    for key, env_name in (('trees', 'DSH_TREES'),
+                          ('tree_dist', 'DSH_TREE_DIST'),
+                          ('tree_h', 'DSH_TREE_H'),
+                          ('hour', 'DSH_HOUR'),
+                          ('fog', 'DSH_FOG'),
+                          ('armor', 'DSH_ARMOR'),
+                          ('armor_color', 'DSH_ARMOR_COLOR')):
+        v = params.get(key)
+        if v is None:
+            continue
+        env[env_name] = ('%g' % v) if isinstance(v, float) else str(v)
+    _cl = params.get('clouds')
+    if _cl is not None:
+        env['DSH_CLOUDS'] = '1' if _cl else '0'
+    # items 支持三种写法：{'right':..,'left':..} / ['右','左'] / "R=x,L=y"
+    _it = params.get('items')
+    if _it is not None:
+        _r = _l = ''
+        if isinstance(_it, dict):
+            _r = str(_it.get('right') or '')
+            _l = str(_it.get('left') or '')
+        elif isinstance(_it, (list, tuple)):
+            _r = str(_it[0]) if len(_it) > 0 and _it[0] is not None else ''
+            _l = str(_it[1]) if len(_it) > 1 and _it[1] is not None else ''
+        else:
+            for _part in str(_it).replace('，', ',').split(','):
+                _k, _, _v = _part.partition('=')
+                _k = _k.strip().upper()
+                if _k in ('R', 'RIGHT', '右手'):
+                    _r = _v.strip()
+                elif _k in ('L', 'LEFT', '左手'):
+                    _l = _v.strip()
+        env['DSH_ITEM_R'] = _r
+        env['DSH_ITEM_L'] = _l
     t0 = time.time()
     rc, out = run(args, log=os.path.join(out_dir, '_build.log'), env=env)
     if rc != 0:

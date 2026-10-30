@@ -196,6 +196,28 @@ def bake_textures(needed, outdir):
     return cache
 
 
+_ALPHA_CACHE = {}
+
+
+def tex_has_alpha(texname):
+    """这张贴图里有没有真镂空（alpha < 250 的像素）。
+    方块贴图都是 16×16，读一遍很便宜，结果缓存。"""
+    if texname in _ALPHA_CACHE:
+        return _ALPHA_CACHE[texname]
+    ok = False
+    try:
+        from PIL import Image
+        src = os.path.join(TEX_SRC, texname + '.png')
+        if os.path.isfile(src):
+            im = Image.open(src)
+            if 'A' in im.getbands():
+                ok = im.convert('RGBA').split()[3].getextrema()[0] < 250
+    except Exception:
+        ok = False
+    _ALPHA_CACHE[texname] = ok
+    return ok
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('save')
@@ -299,6 +321,41 @@ def main():
     mat_names = [tex + ('__t' if tint else '') for (_b, _k, tex, tint) in slots]
 
     # ---- 写 OBJ ----
+    # ★ 植物类方块（花/草/蘑菇/树苗…）不能再当【立方体】导：贴图是带镂空的
+    #   16×16 sprite，做成六面盒子后 Blender 里 Alpha 镂空一开，就会看到
+    #   同一朵花贴在 6 个面上（正面、侧面、顶面各一份）→ 用户说的「花错位」，
+    #   而且它作为"实心方块"还会把脚下草地的顶面剔掉 →「地上是透明的」。
+    #   这里改成 MC 原版的十字面片（两个对角面），并且不让它参与遮挡剔除。
+    PLANT_KEYS = (
+        'flower', 'dandelion', 'poppy', 'cornflower', 'tulip', 'allium',
+        'orchid', 'azure_bluet', 'oxeye_daisy', 'lily_of_the_valley',
+        'wither_rose', 'sunflower', 'lilac', 'rose_bush', 'peony',
+        'sapling', 'seedling', 'short_grass', 'tall_grass', 'fern',
+        'dead_bush', 'bush', 'mushroom', 'sugar_cane', 'wheat', 'carrots',
+        'potatoes', 'beetroot', 'sweet_berry', 'roots', 'sprouts',
+        'torchflower', 'pink_petals', 'seagrass', 'kelp', 'vine', 'azalea',
+        'nether_wart', 'crimson_fungus', 'warped_fungus', 'glow_lichen',
+    )
+    PLANT_SKIP = ('grass_block', 'cactus', 'mushroom_block', 'mushroom_stem',
+                  'leaves', 'lily_pad')
+
+    def is_plant(bname):
+        n = bname.split(':')[-1]
+        for sk in PLANT_SKIP:
+            if sk in n:
+                return False
+        if n.endswith('_block') or n.endswith('_slab') or n.endswith('_stairs'):
+            return False
+        for k in PLANT_KEYS:
+            if k in n:
+                return True
+        # 兜底：贴图本身有镂空 → 一定是 sprite 类
+        t = resolve_textures(bname).get('side')
+        return bool(t) and tex_has_alpha(t)
+
+    plants = {k for k, v in valid.items() if is_plant(v[0])}
+    occl = {k: v for k, v in valid.items() if k not in plants}
+
     objp = os.path.join(a.outdir, a.name + '.obj')
     mtlp = os.path.join(a.outdir, a.name + '.mtl')
     verts, vcache = [], {}
@@ -311,81 +368,64 @@ def main():
             verts.append(p)
         return i
 
-    lines = ['# 由 mc_导出OBJ 从 Minecraft 存档生成', f'mtllib {a.name}.mtl', 'o ' + a.name]
+    # 十字面片：两块对角平面，跟 MC 的 cross 模型一致
+    CROSS = (
+        ((0, 0, 0), (1, 0, 1), (1, 1, 1), (0, 1, 0)),
+        ((1, 0, 0), (0, 0, 1), (0, 1, 1), (1, 1, 0)),
+    )
+
+    facelines = []
     cur_slot = None
     nface = 0
     culled = 0
+    nplant = 0
     cull = not a.no_cull
     for (X, Y, Z), (bn, props) in valid.items():
         lo, hi = block_extent(bn, props)
+        if (X, Y, Z) in plants:
+            si = slot_i.get((bn, 'side'))
+            if si is None:
+                continue
+            if si != cur_slot:
+                facelines.append('usemtl ' + mat_names[si])
+                cur_slot = si
+            for quad in CROSS:
+                idx = [vid((X + cx, Y + cy * hi, Z + cz)) for (cx, cy, cz) in quad]
+                facelines.append('f ' + ' '.join(
+                    '%d/%d' % (i + 1, k + 1) for k, i in enumerate(idx)))
+                nface += 1
+            nplant += 1
+            continue
         for (dx, dy, dz), corners, kind in FACES:
-            if cull and (X + dx, Y + dy, Z + dz) in valid:
+            if cull and (X + dx, Y + dy, Z + dz) in occl:
                 culled += 1
                 continue
             si = slot_i.get((bn, kind))
             if si is None:
                 continue
             if si != cur_slot:
-                lines.append('usemtl ' + mat_names[si])
+                facelines.append('usemtl ' + mat_names[si])
                 cur_slot = si
             idx = []
             for (cx2, cy2, cz2) in corners:
                 # 角点约定 (x, y, z)，高度是【第 2 个分量 cy2】。
                 # 早先误用 cz2 当高度：Y 与 Z 被绑死 → 面出现重复顶点 → 退化。
                 # 完整方块碰巧仍是合法立方体（错切），半砖则完全错。
-                # Blender 的导入器把退化面丢了（104465 → 40602），才让它暴露。
                 yy = lo if cy2 == 0 else hi
                 idx.append(vid((X + cx2, Y + yy, Z + cz2)))
-            lines.append('f %s' % ' '.join('%d/%d' % (i + 1, i + 1) for i in idx))
+            facelines.append('f ' + ' '.join(
+                '%d/%d' % (i + 1, k + 1) for k, i in enumerate(idx)))
             nface += 1
 
-    with open(objp, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines[:3]) + '\n')
-        for (x, y, z) in verts:
-            f.write('v %.4f %.4f %.4f\n' % (x, y, z))
-        for (x, y, z) in verts:
-            f.write('vt %.4f %.4f\n' % (0.0, 0.0))   # 占位，下面用真实 UV
-        f.write('\n'.join(lines[3:]) + '\n')
-
-    # OBJ 的 vt 需要真实 UV：重写一遍，每个顶点用其所在面的 UV
-    # （方块贴图整面 0~1，所以四个角就是 (0,0)(0,1)(1,1)(1,0)）
     with open(objp, 'w', encoding='utf-8') as f:
         f.write('# 由 mc_导出OBJ 从 Minecraft 存档生成\n')
         f.write(f'mtllib {a.name}.mtl\no {a.name}\n')
         for (x, y, z) in verts:
             f.write('v %.4f %.4f %.4f\n' % (x, y, z))
-        uv = ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))
-        vi = 0
-        for (X, Y, Z), (bn, props) in valid.items():
-            lo, hi = block_extent(bn, props)
-            for (dx, dy, dz), corners, kind in FACES:
-                if cull and (X + dx, Y + dy, Z + dz) in valid:
-                    continue
-                if slot_i.get((bn, kind)) is None:
-                    continue
-                for (u, v) in uv:
-                    f.write('vt %.4f %.4f\n' % (u, v))
-        f.write('\n')
-        cur_slot = None
-        for (X, Y, Z), (bn, props) in valid.items():
-            lo, hi = block_extent(bn, props)
-            for (dx, dy, dz), corners, kind in FACES:
-                if cull and (X + dx, Y + dy, Z + dz) in valid:
-                    continue
-                si = slot_i.get((bn, kind))
-                if si is None:
-                    continue
-                if si != cur_slot:
-                    f.write('usemtl ' + mat_names[si] + '\n')
-                    cur_slot = si
-                idx = []
-                for (cx2, cy2, cz2) in corners:
-                    yy = lo if cy2 == 0 else hi
-                    idx.append(vid((X + cx2, Y + yy, Z + cz2)))
-                f.write('f ' + ' '.join('%d/%d' % (i + 1, vi + k + 1)
-                                        for k, i in enumerate(idx)) + '\n')
-                vi += 4
-        f.write('\n')
+        # 所有面都是贴图整面 0~1，四组 UV 全局共用
+        for (u, v) in ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)):
+            f.write('vt %.4f %.4f\n' % (u, v))
+        f.write('\n'.join(facelines) + '\n')
 
     with open(mtlp, 'w', encoding='utf-8') as f:
         f.write('# 由 mc_导出OBJ 生成\n')
@@ -399,7 +439,7 @@ def main():
             f.write('Kd 1.000 1.000 1.000\nKa 0.000 0.000 0.000\nKs 0.000 0.000 0.000\n')
             f.write('d 1.0\nillum 1\n\n')
 
-    print(f"OBJ: {len(verts)} 顶点 / {nface} 面（剔除 {culled}）")
+    print(f"OBJ: {len(verts)} 顶点 / {nface} 面（剔除 {culled}；其中 {nplant} 个植物方块按十字面片导）")
     print(f"  {objp}")
     print(f"  {mtlp}")
     print(f"  {os.path.join(a.outdir, 'tex')}\\  （{have} 张贴图）")
