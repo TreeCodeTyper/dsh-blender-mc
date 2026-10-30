@@ -589,7 +589,10 @@ def animate(blender_exe, blend, out_dir, total=240, fps=24, kind='aura',
     args = [blender_exe, '-b', blend, '--python', script, '--',
             out_dir, str(total), str(fps), preview or '']
     if recipe:
-        args.append(recipe)
+        # 配方自己写死了 duration / fps（walk 128 帧、run 80 帧），
+        # 别用命令行默认的 240 把它撑长 —— 传空让配方说了算。
+        args = [blender_exe, '-b', blend, '--python', script, '--',
+                out_dir, '', '', preview or '', recipe]
     t0 = time.time()
     rc, out = run(args, log=os.path.join(out_dir, '_anim.log'))
     if rc != 0:

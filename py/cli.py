@@ -80,6 +80,94 @@ def _posint(s):
     return v
 
 
+def _nonneg_int(s):
+    """非负整数：--trees 0 是合法值（不要树），负数/小数要拦住。"""
+    try:
+        v = int(str(s).strip())
+    except ValueError:
+        raise argparse.ArgumentTypeError('要是整数（收到 %r）' % s)
+    if v < 0:
+        raise argparse.ArgumentTypeError('不能是负数（收到 %d）' % v)
+    return v
+
+
+def _float_in(lo, hi):
+    """生成一个「该范围内的数」校验器（--fog / --hour 用）。"""
+    def _check(s):
+        try:
+            v = float(s)
+        except ValueError:
+            raise argparse.ArgumentTypeError('要是数字（收到 %r）' % s)
+        if v < lo or v > hi:
+            raise argparse.ArgumentTypeError('要在 %g–%g 之间（收到 %g）' % (lo, hi, v))
+        return v
+    return _check
+
+
+def _hour(s):
+    """时刻：0–24，或预设名 morning|noon|dusk|night。
+
+    也顺手认 6am / 18:30 这类写法 —— 但认不出就报错，别静默当成 8 点。
+    """
+    t = str(s).strip().lower()
+    if t in ('morning', 'noon', 'dusk', 'night'):
+        return t
+    if ':' in t:
+        try:
+            hh, mm = [float(x) for x in t.split(':', 1)]
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                '时刻要写成 0-24，或 morning|noon|dusk|night（收到 %r）' % s)
+        if not (0 <= hh <= 24 and 0 <= mm < 60):
+            raise argparse.ArgumentTypeError('时刻超出范围: %r' % s)
+        return round(hh + mm / 60.0, 4)
+    if t.endswith('am') or t.endswith('pm'):
+        try:
+            v = float(t[:-2])
+        except ValueError:
+            raise argparse.ArgumentTypeError('时刻要写成 0-24（收到 %r）' % s)
+        if t.endswith('pm') and v < 12:
+            v += 12
+        elif t.endswith('am') and v >= 12:
+            v -= 12
+        return min(24.0, max(0.0, v))
+    try:
+        v = float(t)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            '时刻要写成 0-24，或 morning|noon|dusk|night（收到 %r）' % s)
+    if v < 0 or v > 24:
+        raise argparse.ArgumentTypeError('时刻要在 0–24 之间（收到 %g）' % v)
+    return v
+
+
+def _pair_float(s):
+    """'min,max' 两个数：--tree-dist / --tree-h 用。写反了自动换个头。"""
+    parts = str(s).replace(' ', '').split(',')
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError('要写成 两个数，逗号分隔，例如 7,20（收到 %r）' % s)
+    try:
+        a, b = float(parts[0]), float(parts[1])
+    except ValueError:
+        raise argparse.ArgumentTypeError('要写成 两个数，逗号分隔，例如 7,20（收到 %r）' % s)
+    if a < 0 or b < 0:
+        raise argparse.ArgumentTypeError('不能是负数（收到 %r）' % s)
+    if a > b:
+        a, b = b, a
+        print('（%s 的起止写反了，已自动按 %g,%g 处理）' % ('tree 区间', a, b))
+    return '%g,%g' % (a, b)
+
+
+def _switch(s):
+    """开/关：--clouds 1|0（也认 on/off/true/false/yes/no）。"""
+    t = str(s).strip().lower()
+    if t in ('1', 'on', 'true', 'yes', 'y'):
+        return 1
+    if t in ('0', 'off', 'false', 'no', 'n'):
+        return 0
+    raise argparse.ArgumentTypeError('要是 1 或 0（收到 %r）' % s)
+
+
 def _need_save(save):
     """存档目录先查一遍，别等 anvil 抛 FileNotFoundError 把 traceback 甩给用户。"""
     if not os.path.isdir(save):
@@ -223,6 +311,32 @@ def cmd_shoot(a):
         params['res'] = a.res
     if a.samples:
         params['samples'] = a.samples
+    # ── v0.5.0 新参数：只把「用户真给了」的塞进去 ─────────────────────
+    #    item 的空字符串是合法值（= 空手），所以按 is not None 判断；
+    #    pipeline.step_render 也按 is not None 决定要不要设 env，
+    #    于是不传任何新参数时 Blender 侧看到的 env 与 v0.4.6 一模一样。
+    #    ⚠️ CLI 叫 --item-right，pipeline 里的键是 item_r —— 这里统一改名，
+    #       不要直接把 argparse 的 dest 塞进 params（否则静默不生效）。
+    for arg_name, key in (('item_right', 'item_r'),
+                          ('item_left', 'item_l'),
+                          ('items', 'items'),
+                          ('armor', 'armor'),
+                          ('armor_color', 'armor_color'),
+                          ('trees', 'trees'),
+                          ('tree_dist', 'tree_dist'),
+                          ('tree_h', 'tree_h'),
+                          ('hour', 'hour'),
+                          ('fog', 'fog'),
+                          ('clouds', 'clouds')):
+        v = getattr(a, arg_name, None)
+        if v is not None:
+            params[key] = v
+    if params.get('items') is not None and (
+            params.get('item_r') is not None or params.get('item_l') is not None):
+        # 契约：--items 给了就覆盖 --item-right/--item-left
+        print('（同时给了 --items 和 --item-right/--item-left，以 --items 为准）')
+        params.pop('item_r', None)
+        params.pop('item_l', None)
     center = a.center
     r = shoot(a.save, a.area, a.out, blender=a.blender, params=params,
               center=center, radius=a.radius, max_attempts=a.attempts,
@@ -298,6 +412,36 @@ def cmd_check(a):
             for i, s in enumerate(r.get('issues', []), 1):
                 print(f'  ⚠️  [{i}] {s}')
     return 1 if bad else 0
+
+
+
+def cmd_mobs(a):
+    """MCprep 生物 / 玩家 rig 库（课程 T52 的生物生成器，无界面版）。"""
+    import mobs
+    if a.action in ('list', 'find'):
+        return mobs.main([a.action] + ([a.query] if a.query else []))
+    if a.action == 'spawn':
+        exe = a.blender or _default_blender()
+        ok, log = mobs.spawn(a.query, a.blend, a.out, exe,
+                             pos=[float(v) for v in a.pos.split(',')],
+                             scale=float(a.scale))
+        for ln in [x for x in log.splitlines() if x.startswith('[mobs]')]:
+            print(ln)
+        if not ok:
+            print('生成失败，日志尾部：')
+            print('\n'.join(log.splitlines()[-12:]))
+            return 1
+        return 0
+    print('未知动作：%s（list / find / spawn）' % a.action)
+    return 2
+
+
+def _default_blender():
+    import requirements
+    try:
+        return requirements.find_blender()
+    except Exception:
+        return 'blender'
 
 
 def cmd_map(a):
@@ -392,6 +536,33 @@ def main():
                    help='人物皮肤：绝对路径，或皮肤库里的名字（<DSH_HOME>/blender-mc/skins/）')
     h.add_argument('--attempts', type=_posint, default=3)
     h.add_argument('--target', type=int, default=85)
+    # ── v0.4.9 新参数：全部可选，不给 = 与 v0.4.6 完全一致 ────────────────
+    #    名字必须与 docs/NEW_PARAMS.md 第三节一致：lib/index.js 是按
+    #    key.replaceAll('_','-') 拼这些 flag 的，写错一个就静默不生效。
+    h.add_argument('--item-right', dest='item_right', default=None, metavar='TEXT',
+                   help='右手物品：物品库里的名字（如 "Sword: Diamond"）、'
+                        'MC 方块/物品 id（如 anvil）、或空字符串=空手')
+    h.add_argument('--item-left', dest='item_left', default=None, metavar='TEXT',
+                   help='左手物品（同上）')
+    h.add_argument('--items', default=None, metavar='TEXT',
+                   help='简写 "R=anvil,L=crafting_table"；给了就覆盖 --item-right/--item-left')
+    h.add_argument('--armor-color', default=None, metavar='HEX',
+                   help='盔甲染色：#RRGGBB（也可以直接写在 --armor 里，如 leather#8B4513）')
+    h.add_argument('--armor', default=None, metavar='TEXT',
+                   help='盔甲：材质名 leather|iron|gold|diamond|netherite，'
+                        '或 helmet=Netherite,chest=Gold；none=不穿')
+    h.add_argument('--trees', type=_nonneg_int, default=None,
+                   help='身后树林数量（0=不要树）')
+    h.add_argument('--tree-dist', dest='tree_dist', type=_pair_float, default=None,
+                   metavar='MIN,MAX', help='树的距离区间，默认 7,20')
+    h.add_argument('--tree-h', dest='tree_h', type=_pair_float, default=None,
+                   metavar='MIN,MAX', help='树的高度区间，默认 4,7')
+    h.add_argument('--hour', type=_hour, default=None,
+                   help='时刻 0-24，或 morning|noon|dusk|night（默认 8）')
+    h.add_argument('--fog', type=_float_in(0, 100), default=None,
+                   help='雾浓度倍率（0=关雾；不给=保持旧行为）')
+    h.add_argument('--clouds', type=_switch, default=None,
+                   help='云 1/0（0=隐藏云层/雾体积/方块云）')
     h.set_defaults(func=cmd_shoot)
 
     n = sub.add_parser('anim', help='出动画（10 秒杀戮光环）')
@@ -424,6 +595,16 @@ def main():
     mp.add_argument('rest', nargs=argparse.REMAINDER,
                     help='import|list|get|resolve|rename|delete|default|doctor + 各自参数')
     mp.set_defaults(func=cmd_map)
+
+    mo = sub.add_parser('mobs', help='MCprep 生物 rig 库：列出来 / 搜 / 生成进工程')
+    mo.add_argument('action', choices=['list', 'find', 'spawn'])
+    mo.add_argument('query', nargs='?', default='', help='find 的关键词 / spawn 的生物名')
+    mo.add_argument('--blend', default=None, help='spawn：目标工程 .blend')
+    mo.add_argument('--out', default=None, help='spawn：另存的 .blend（默认覆盖 blend）')
+    mo.add_argument('--pos', default='0,0,0', help='spawn：摆放位置 x,y,z（默认 0,0,0）')
+    mo.add_argument('--scale', default='1.0', help='spawn：缩放（默认 1.0）')
+    mo.set_defaults(func=cmd_mobs)
+
 
     a = ap.parse_args(_hoist_blender(sys.argv[1:]))
     try:

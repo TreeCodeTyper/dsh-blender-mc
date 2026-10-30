@@ -1,0 +1,73 @@
+{
+  "name": "ride",
+  "title": "史蒂夫骑熊猫穿过橡木林",
+  "blend_name": "骑乘.blend",
+  "fps": 24,
+  "duration": 120,
+
+  "motion": {
+    "type": "ground",
+    "az": 20.0,
+    "speed": 0.055,
+    "start": 1,
+    "bob": {"amount": 0.05, "cycle": 16}
+  },
+
+  "mount": {
+    "rig": "Fox Panda",
+    "keyword": "Panda",
+    "seat_dz": -0.12,
+    "seat_y": -0.55,
+    "yaw": 180.0
+  },
+
+  "poses": {
+    "Top Leg.L":    [[1, [64, 0, 12]]],
+    "Top Leg.R":    [[1, [64, 0, -12]]],
+    "Bottom Leg.L": [[1, [-58, 0, 0]]],
+    "Bottom Leg.R": [[1, [-58, 0, 0]]],
+    "Fancy Feet.L": [[1, [14, 0, 0]]],
+    "Fancy Feet.R": [[1, [14, 0, 0]]],
+    "Torso":        [[1, [4, 0, 0]]],
+    "Pelvis":       [[1, [-4, 0, 0]]],
+    "Head":         [[1, [-9, 0, 0]]],
+    "Top Arm.L":    [[1, [-46, 0, -8]]],
+    "Top Arm.R":    [[1, [-46, 0, 8]]],
+    "Bottom Arm.L": [[1, [-24, 0, 0]]],
+    "Bottom Arm.R": [[1, [-24, 0, 0]]]
+  },
+
+  "camera": {
+    "az":   [[1, 262.0], [120, 258.0]],
+    "dist": [[1, 8.2],   [120, 8.8]],
+    "lens": [[1, 45.0],  [120, 50.0]],
+    "rise": [[1, 0.0]],
+    "z_base": 2.40,
+    "aim_h": 1.25,
+    "dof": 2.4,
+    "key_step": 2
+  },
+
+  "lights": {
+    "key_step": 4,
+    "fill": {"energy": 900.0, "size": 5.0, "color": [0.88, 0.93, 1.0],
+             "forward": 2.0, "up": 1.1}
+  },
+
+  "stage": {
+    "hide_world": true,
+    "hide_held": true,
+    "ground": {"size": 200.0, "tile": 4.0, "a": [0.34, 0.52, 0.24], "b": [0.30, 0.47, 0.21]}
+  },
+
+  "render": {
+    "res": "1280x720",
+    "samples": 32,
+    "exposure": 0.0,
+    "motion_blur": 0.3,
+    "view_transform": "AgX",
+    "look": "AgX - Punchy",
+    "hide_fog": true,
+    "frame_prefix": "frame_"
+  }
+}

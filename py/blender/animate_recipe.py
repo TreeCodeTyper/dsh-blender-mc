@@ -24,8 +24,17 @@ import anim_kit
 argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
 OUT = os.path.abspath(argv[0])
 os.makedirs(OUT, exist_ok=True)
-TOTAL = int(argv[1]) if len(argv) > 1 else None
-FPS = int(argv[2]) if len(argv) > 2 else None
+
+
+def _num(i):
+    """空串 = 没给 → 交给配方自己的 duration / fps 决定。"""
+    if len(argv) <= i or not str(argv[i]).strip():
+        return None
+    return int(argv[i])
+
+
+TOTAL = _num(1)
+FPS = _num(2)
 PREVIEW = argv[3] if len(argv) > 3 else ''
 RECIPE = argv[4] if len(argv) > 4 else os.environ.get('DSH_ANIM_RECIPE', '')
 

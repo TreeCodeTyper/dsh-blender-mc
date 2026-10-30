@@ -266,7 +266,327 @@ def motion_fly(ctx, m):
             'FV': FV, 'UP': UP, 'axis': UP.cross(FV).normalized()}
 
 
-MOTIONS = {'fly': motion_fly}
+def motion_leap(ctx, m):
+    """起飞 → 平飞 → 降落：高度先升到 height 再回到地面，水平位移匀速。
+
+    fly 的位移是"一次缓入缓出"，起落对称且终点还在高处，做不了完整起降；
+    leap 把高度和位移拆成两条独立曲线：
+      height(f) = height · (smoothstep(升) − smoothstep(降))   → 起、落各一段
+      along(f)  = dist · (f−1)/(total−1)                       → 巡航匀速
+    m 的键：az、height、dist、rise [起,止]、fall [起,止]、bob 巡航期的上下浮动、
+            tilt/bank {scale, terms}（用两条权重 +1/−1 的 terms 就能做"抬起来再放平"）。
+    """
+    az = math.radians(float(m.get('az', 20)))
+    FV = mu.Vector((math.cos(az), math.sin(az), 0.0))
+    UP = mu.Vector((0.0, 0.0, 1.0))
+    base = ctx['base']
+    height = float(m.get('height', 4.0))
+    dist = float(m.get('dist', 60.0))
+    rise = m.get('rise', [1, 52])
+    fall = m.get('fall', [188, 240])
+    bob = float(m.get('bob', 0.0))
+    tilt_cfg = m.get('tilt') or {'scale': 0.0, 'terms': []}
+    bank_cfg = m.get('bank') or {'scale': 0.0, 'terms': []}
+    span = float(max(1e-6, ctx['total'] - 1))
+
+    def height_at(f):
+        a = smoothstep((f - rise[0]) / float(max(1e-6, rise[1] - rise[0])))
+        b = smoothstep((f - fall[0]) / float(max(1e-6, fall[1] - fall[0])))
+        return height * (a - b)
+
+    def char_world(f):
+        u = min(1.0, max(0.0, (f - 1) / span))
+        return base + FV * (dist * u) + UP * (height_at(f) + bob * math.sin(u * math.pi * 5.0))
+
+    def yaw(f):
+        return ctx['base_rz']
+
+    def tilt(f):
+        return float(tilt_cfg.get('scale', 0)) * _terms(f, tilt_cfg.get('terms') or [])
+
+    def bank(f):
+        return float(bank_cfg.get('scale', 0)) * _terms(f, bank_cfg.get('terms') or [])
+
+    return {'char_world': char_world, 'yaw': yaw, 'tilt': tilt, 'bank': bank,
+            'FV': FV, 'UP': UP, 'axis': UP.cross(FV).normalized(),
+            'speed': dist / span, 'dist': dist}
+
+
+def motion_ground(ctx, m):
+    """贴着地面匀速前进 —— 走路、跑步、任何"一直往前走"的循环都用它。
+
+    和 fly 的区别：fly 是缓入缓出的位移曲线（起跳→滑行→停），
+    地面的循环动作必须**匀速**，否则脚一定打滑。
+
+    m 的键：
+        az      前进方位角（0 = +X）
+        speed   速度，世界单位/帧。脚不打滑靠它：
+                speed = 一个循环里脚相对身体向后走的距离 ÷ 循环帧数
+        start   从第几帧开始走（之前原地踏步）
+        yaw     相对骨架基准朝向的偏转（度）
+        bob     {amount, cycle} 身体上下起伏：amount 格、cycle 帧一个来回
+    """
+    az = math.radians(float(m.get('az', 0.0)))
+    FV = mu.Vector((math.cos(az), math.sin(az), 0.0))
+    UP = mu.Vector((0.0, 0.0, 1.0))
+    base = ctx['base']
+    speed = float(m.get('speed', 0.0))
+    start = float(m.get('start', 1))
+    bob = m.get('bob') or {}
+    bob_a = float(bob.get('amount', 0.0))
+    bob_c = max(1.0, float(bob.get('cycle', 16)))
+    yaw0 = ctx['base_rz'] + math.radians(float(m.get('yaw', 0.0)))
+
+    def dist(f):
+        return speed * max(0.0, f - start)
+
+    def char_world(f):
+        d = dist(f)
+        b = bob_a * math.sin(2.0 * math.pi * (f - start) / bob_c) if bob_a else 0.0
+        return base + FV * d + UP * b
+
+    return {'char_world': char_world, 'yaw': lambda f: yaw0,
+            'tilt': lambda f: 0.0, 'bank': lambda f: 0.0,
+            'FV': FV, 'UP': UP, 'axis': UP.cross(FV).normalized(),
+            'speed': speed, 'dist': dist}
+
+
+MOTIONS = {'fly': motion_fly, 'ground': motion_ground, 'leap': motion_leap}
+
+
+# ── 坐骑 ───────────────────────────────────────────────────────────────
+# 课程 T52 讲的「生物生成器」：MCprep 自带一堆绑好的生物（panda、horse、cat…）。
+# 但在 -b 无界面模式下 bpy.ops.mcprep 是空的（ops 只在 GUI 注册），
+# 所以这里直接 append MCprep 的 rig .blend，规则和 py/mobs.py 一致：
+# 一套角色 = 骨架 + 它的对象子级 + 蒙皮到它的网格。
+MOUNT_RIG_GROUPS = ('custom', 'friendly', 'hostile', 'passive', 'player')
+
+
+def _mcprep_rig_dirs():
+    import glob as _glob
+    base = bpy.utils.user_resource('SCRIPTS', path='addons')
+    pat = os.path.join(base, 'MCprep_addon', 'MCprep_resources', 'rigs', '*')
+    dirs = sorted(_glob.glob(pat), reverse=True)
+    return [d for d in dirs if os.path.isdir(d)]
+
+
+def _find_mount_rig(query):
+    """按名字片段找 MCprep 的 rig 文件（"panda" / "Fox Panda" / "Horse" 都行）。"""
+    q = (query or '').lower()
+    hits = []
+    for d in _mcprep_rig_dirs():
+        for fn in sorted(os.listdir(d)):
+            if fn.endswith('.blend') and q in fn.lower():
+                hits.append(os.path.join(d, fn))
+    if not hits:
+        raise RuntimeError('MCprep rig 库里找不到坐骑：%s' % query)
+    return hits[0]
+
+
+def load_mount_rig(spec, ctx):
+    """append 一个坐骑 rig，只留一套角色，归一化到"脚落 z=0、水平居中"。
+
+    返回 (armature_object, 背高)。背高用来算骑手该坐多高。
+    """
+    path = spec.get('path') or _find_mount_rig(spec.get('rig') or spec.get('name') or '')
+    stem = os.path.splitext(os.path.basename(path))[0]
+    kw = spec.get('keyword') or stem.split(' - ')[0]
+    p('\\n[0] 坐骑：%s（%s）' % (path, kw))
+
+    with bpy.data.libraries.load(path, link=False) as (df, dt):
+        allnames = [n for n in df.objects]
+        # 先只加载名字里带关键词的对象（Fox Panda 里同时有 fox.* 和 panda.*）
+        focus = [n for n in allnames if kw.lower() in n.lower()]
+        want = focus if focus else allnames
+        dt.objects = want
+    loaded = [o for o in dt.objects if o is not None]
+    p('    载入 %d 个数据块，其中对象 %d（关键词命中 %d / 全部 %d）'
+      % (len(want), len(loaded), len(focus), len(allnames)))
+
+    arms = [o for o in loaded if o.type == 'ARMATURE']
+    words = [w for w in kw.replace('-', ' ').split() if w]
+    best = None
+    for cand in arms:
+        low = cand.name.lower()
+        for w in words:
+            if w.lower() in low and (best is None or len(w) > best[0]):
+                best = (len(w), cand)
+    tgt = best[1] if best else (arms[0] if arms else None)
+
+    keep = []
+    if tgt is not None:
+        keep.append(tgt)
+        for ob in loaded:
+            if ob is tgt or ob.type in ('CAMERA', 'LIGHT', 'FONT'):
+                continue
+            if ob.parent is tgt:
+                keep.append(ob)
+            elif any(m.type == 'ARMATURE' and m.object is tgt for m in ob.modifiers):
+                keep.append(ob)
+    else:
+        keep = [o for o in loaded if o.type == 'MESH']
+
+    col = ctx['sc'].collection
+    for ob in keep:
+        if ob.name not in col.objects:
+            try:
+                col.objects.link(ob)
+            except RuntimeError:
+                pass
+        # rig 文件里不少部件是隐藏的（表情/变体），不放开的话熊猫只剩半个
+        ob.hide_render = False
+        ob.hide_viewport = False
+    # 多余的对象（另一套角色、相机、灯光…）不删，整体挪进一个隐藏集合 ——
+    # 删父级会连带清掉子级引用，隐藏最稳。
+    extra = [o for o in loaded if o not in keep]
+    if extra:
+        hid = bpy.data.collections.new('_mount_extra')
+        col.children.link(hid)
+        for ob in extra:
+            for c in list(ob.users_collection):
+                try:
+                    c.objects.unlink(ob)
+                except RuntimeError:
+                    pass
+            try:
+                hid.objects.link(ob)
+            except RuntimeError:
+                pass
+        hid.hide_render = True
+        hid.hide_viewport = True
+
+    # 归一化：水平居中 + 脚落 z=0
+    lo = mu.Vector((1e9, 1e9, 1e9))
+    hi = mu.Vector((-1e9, -1e9, -1e9))
+    for ob in keep:
+        if ob.type != 'MESH':
+            continue
+        for c in ob.bound_box:
+            w = ob.matrix_world @ mu.Vector(c)
+            lo = mu.Vector((min(lo.x, w.x), min(lo.y, w.y), min(lo.z, w.z)))
+            hi = mu.Vector((max(hi.x, w.x), max(hi.y, w.y), max(hi.z, w.z)))
+    back_z = (hi.z - lo.z) if tgt is not None else 0.0
+    # rig 里可能带着摆姿势的动画数据，一跑 frame_set 熊猫就趴下了 —— 清掉
+    for ob in keep:
+        try:
+            if ob.animation_data is not None:
+                ob.animation_data_clear()
+        except Exception:
+            pass
+    if tgt is not None and tgt.data is not None:
+        try:
+            if tgt.data.animation_data is not None:
+                tgt.data.animation_data_clear()
+        except Exception:
+            pass
+    # 归一化偏移不直接写进 location（后面每帧要按骑手位置重设它），
+    # 而是返回给调用方，让调用方把"居中量 + 世界位置"一起算。
+    fit = mu.Vector((-(lo.x + hi.x) * 0.5, -(lo.y + hi.y) * 0.5, -lo.z))
+    p('    背高 %.2f  物体 %d 个' % (back_z, len(keep)))
+    return tgt, back_z, fit
+
+
+
+# ═══════════════════════════════════════════════════════════════
+# 5. 循环动作：只写半个循环，剩下的交给镜像 + 复制
+# ═══════════════════════════════════════════════════════════════
+def mirror_bone(name):
+    """Blender「粘贴翻转姿势」的骨骼名规则：左右互换。"""
+    for a, b in (('.L', '.R'), ('_L', '_R'), ('Left', 'Right'), ('left', 'right')):
+        if name.endswith(a):
+            return name[:-len(a)] + b
+        if name.endswith(b):
+            return name[:-len(b)] + a
+    return name
+
+
+def mirror_xyz(v):
+    """翻转姿势的欧拉角规则：X 不动，Y/Z 取负。"""
+    return [v[0], -v[1], -v[2]]
+
+
+def expand_cycle(poses, cyc):
+    """把「半个循环的关键姿势」展开成完整循环。
+
+    输入 poses 写的是 0 ≤ f < length/2 的姿势（例如走路：接触帧 0、过渡帧 8），
+    这里负责：
+      ① 镜像到后半循环（骨骼 .L/.R 互换、Y/Z 取负）—— 等价于 Ctrl+Shift+V
+      ② 复制 repeats 次铺满全片 —— 等价于 Shift+D
+      ③ 闭环：末帧补上第 0 帧的值（漏了这步，最后一帧会烂成插值垃圾）
+    cyc 的键：length 循环帧数 / repeats 复制几遍 / mirror 是否镜像（默认 true）
+    """
+    length = int(cyc.get('length', 32))
+    repeats = max(1, int(cyc.get('repeats', 1)))
+    mirror = bool(cyc.get('mirror', True))
+    half = length // 2
+    frames = {name: {} for name in poses}
+    for name, seq in poses.items():
+        for f, xyz in seq:
+            f = float(f)
+            if f >= length:
+                continue
+            frames.setdefault(name, {})[f] = [float(v) for v in xyz]
+
+    if mirror:
+        for name, by_f in list(frames.items()):
+            tgt = mirror_bone(name)
+            frames.setdefault(tgt, {})
+            for f, xyz in list(by_f.items()):
+                if f >= half:
+                    continue
+                frames[tgt].setdefault(f + half, mirror_xyz(xyz))
+
+    # 闭环：每根骨在 length 处必须有键，值取它自己的 f=0
+    for name, by_f in frames.items():
+        if length not in by_f and 0.0 in by_f:
+            by_f[length] = list(by_f[0.0])
+
+    out = {}
+    for name, by_f in frames.items():
+        keys = []
+        for k in range(repeats):
+            off = k * length
+            for f in sorted(by_f):
+                if k > 0 and f == 0.0:
+                    continue          # 上一遍的末帧已经是这个值，别打双键
+                keys.append((f + off, list(by_f[f])))
+        if not keys:
+            continue
+        out[name] = keys
+    return out
+
+
+def fcurves_of(action):
+    """Blender 4.4+ 的分层 Action 没有 .fcurves，得自己钻进去。"""
+    fc = getattr(action, 'fcurves', None)
+    if fc is not None:
+        return list(fc)
+    out = []
+    for layer in getattr(action, 'layers', None) or []:
+        for strip in getattr(layer, 'strips', None) or []:
+            for bag in getattr(strip, 'channelbags', None) or []:
+                out.extend(list(getattr(bag, 'fcurves', None) or []))
+    return out
+
+
+def mark_linear(arm, frames, only_rot=True):
+    """把指定帧上的关键帧改成线性插值 —— 接触帧必须这样，脚才不滑。
+
+    T14 原话：只给「接触帧」的那几个关键帧设 linear，过渡帧不要动。
+    """
+    ad = arm.animation_data
+    if not ad or not ad.action:
+        return 0
+    want = set(round(float(f), 3) for f in frames)
+    n = 0
+    for fc in fcurves_of(ad.action):
+        if only_rot and 'rotation_euler' not in fc.data_path:
+            continue
+        for kp in fc.keyframe_points:
+            if round(float(kp.co[0]), 3) in want:
+                kp.interpolation = 'LINEAR'
+                n += 1
+    return n
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -503,6 +823,12 @@ def build_camera(ctx, cam, mo, override=None):
     CAM = sc.camera
     if CAM is None:
         raise RuntimeError('场景里没有摄影机')
+    # 封面工程的相机常带 TRACK_TO 约束和对准角色的固定朝向：
+    # 角色一飞走，画面就会整体歪掉。约束会盖掉 euler，必须先摘掉。
+    for c in list(CAM.constraints):
+        CAM.constraints.remove(c)
+    CAM.delta_location = (0.0, 0.0, 0.0)
+    CAM.delta_rotation_euler = (0.0, 0.0, 0.0)
     ov = override or {}
     az = offset_track(cam['az'], ov.get('az_add', 0.0))
     dist = scale_track(cam['dist'], ov.get('d_scale', 1.0))
@@ -530,6 +856,8 @@ def build_camera(ctx, cam, mo, override=None):
         aim = c + UP * aim_h
         sc.frame_set(f)
         CAM.location = pos
+        # 封面工程里相机可能是 QUATERNION 模式，写 euler 会被忽略、画面保持原朝向（歪的）
+        CAM.rotation_mode = 'XYZ'
         CAM.rotation_euler = (aim - pos).to_track_quat('-Z', 'Y').to_euler()
         CAM.data.lens = track(lens, f)
         CAM.keyframe_insert('location', frame=f)
@@ -609,6 +937,80 @@ def follow_lights(ctx, spec, mo, cam_info):
 # ═══════════════════════════════════════════════════════════════
 # 8. 渲染设置
 # ═══════════════════════════════════════════════════════════════
+def clean_stage(ctx, spec):
+    """清理封面工程自带的整片地形，给贴地动作换一块干净地面。
+
+    封面工程是为"飞天"做的：地形 246 格宽、雾盒 150 格 —— 角色一贴地就全被土挡死。
+    spec 的键：
+        hide_world  隐藏所有尺寸超过 50 格的网格（默认 true）
+        hide        额外要隐藏的名字片段（小写子串）
+        hide_held   隐藏挂在骨头上的非蒙皮件＝盔甲和手里的剑（默认 true）
+        ground      建一块棋盘地面：{size, tile, a, b, z}
+    """
+    sc = ctx['sc']
+    base = ctx['base']
+    frags = [str(s).lower() for s in (spec.get('hide') or [])]
+    hidden = 0
+    for ob in list(bpy.data.objects):
+        if ob.type != 'MESH':
+            continue
+        name = ob.name.lower()
+        if 'boneshape' in name or any(f in name for f in frags):
+            ob.hide_render = True
+            hidden += 1
+            continue
+        if spec.get('hide_world', True):
+            try:
+                if max(ob.dimensions) > 50.0:
+                    ob.hide_render = True
+                    hidden += 1
+            except Exception:
+                pass
+
+    # 挂在骨头上的物件（剑 / 盔甲）：parent_type == 'BONE' 且没有 Armature 修改器
+    if spec.get('hide_held', True):
+        for ob in list(bpy.data.objects):
+            if ob.type != 'MESH' or ob.hide_render:
+                continue
+            if getattr(ob, 'parent_type', None) != 'BONE':
+                continue
+            if any(m.type == 'ARMATURE' for m in ob.modifiers):
+                continue
+            ob.hide_render = True
+            hidden += 1
+
+    g = spec.get('ground')
+    if g:
+        size = float(g.get('size', 120.0))
+        tile = max(0.25, float(g.get('tile', 1.0)))
+        za = float(g.get('z', 0.0))
+        mat = bpy.data.materials.new('StageGround')
+        mat.use_nodes = True
+        nt = mat.node_tree
+        bsdf = nt.nodes.get('Principled BSDF')
+        try:
+            tc = nt.nodes.new('ShaderNodeTexCoord')
+            ck = nt.nodes.new('ShaderNodeTexChecker')
+            ck.inputs['Scale'].default_value = max(1.0, size / tile)
+            ck.inputs['Color1'].default_value = tuple(g.get('a', [0.36, 0.38, 0.34])) + (1,)
+            ck.inputs['Color2'].default_value = tuple(g.get('b', [0.29, 0.31, 0.28])) + (1,)
+            nt.links.new(tc.outputs['Generated'], ck.inputs['Vector'])
+            nt.links.new(ck.outputs['Color'], bsdf.inputs['Base Color'])
+            bsdf.inputs['Roughness'].default_value = 0.85
+        except Exception:
+            bsdf.inputs['Base Color'].default_value = (0.32, 0.34, 0.31, 1)
+        mesh = bpy.data.meshes.new('StageGround')
+        mesh.from_pydata([(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)],
+                         [], [(0, 1, 2, 3)])
+        mesh.update()
+        ob = bpy.data.objects.new('StageGround', mesh)
+        sc.collection.objects.link(ob)
+        ob.location = mu.Vector((base.x, base.y, base.z - 0.002 + za))
+        ob.scale = mu.Vector((size * 0.5, size * 0.5, 1.0))
+        ob.data.materials.append(mat)
+    p('    隐藏 %d 个网格%s' % (hidden, '、铺了棋盘地面' if g else ''))
+
+
 def setup_render(ctx, r, out_dir):
     sc = ctx['sc']
     res = str(r.get('res', '960x540')).replace('×', 'x')
@@ -796,6 +1198,29 @@ def build(recipe, out_dir, total=None, fps=None):
     fps = int(fps or recipe.get('fps', 24))
     ctx = scene_ctx(total, fps)
     mo_spec = recipe.get('motion') or {'type': 'fly'}
+
+    # 坐骑：先把坐骑摆好，再按它的背高把骑手整体抬起来 ——
+    # base 一改，下面的位移曲线自然带着骑手一起升，熊猫自己不动。
+    mount_spec = recipe.get('mount') or {}
+    mount_arm, mount_seat = None, 0.0
+    _mount_loc0 = mu.Vector((0.0, 0.0, 0.0))
+    _mount_base0 = mu.Vector((0.0, 0.0, 0.0))
+    if mount_spec:
+        mount_arm, back_z, _mount_d = load_mount_rig(mount_spec, ctx)
+        # 加载时的居中偏移，后面每帧要跟世界位置一起加
+        _mount_loc0 = _mount_d.copy()
+        mount_seat = back_z - 1.18 + float(mount_spec.get('seat_dz', 0.0))
+        ctx['base'] = ctx['base'] + mu.Vector((0.0, 0.0, mount_seat))
+        _mount_base0 = ctx['base'].copy()
+        # 把坐骑转到跟骑手一致：rig 里是朝 -Y，角色被 base_rz 转过
+        try:
+            mount_arm.rotation_mode = 'XYZ'
+            mount_arm.rotation_euler.z += ctx['base_rz'] + math.radians(
+                float(mount_spec.get('yaw', 0.0)))
+        except Exception as _e:
+            p('    !! 坐骑转向失败：%s' % _e)
+        p('    骑手抬高 %.2f（背高 %.2f - 站立臀高 1.18）' % (mount_seat, back_z))
+
     mo = MOTIONS[mo_spec.get('type', 'fly')](ctx, mo_spec)
     FV, UP = mo['FV'], mo['UP']
 
@@ -820,29 +1245,79 @@ def build(recipe, out_dir, total=None, fps=None):
              @ mu.Matrix.Rotation(mo['yaw'](f), 4, 'Z'))
         arm.rotation_quaternion = R.to_quaternion()
         arm.keyframe_insert('rotation_quaternion', frame=f)
+        # 坐骑不挂父级（挂上去会继承骑手的转身/侧倾，熊猫会被转成躺倒），
+        # 改成逐帧跟随同一个世界位移，姿态保持 rig 原样。
+        if mount_arm is not None:
+            # 只动 location：脚底贴着骑手基准往下 mount_seat；
+            # seat_y 沿角色前后方向算（正 = 往前坐），不能直接加到世界 Y 上，
+            # 否则角色一转，骑手就偏到熊猫侧面去了。
+            _fwd = mu.Vector((0.0, -1.0, 0.0))
+            _fwd.rotate(mu.Euler((0.0, 0.0, ctx['base_rz'])))
+            mount_arm.location = (_mount_loc0 + mu.Vector(
+                (arm.location.x, arm.location.y, arm.location.z - mount_seat))
+                - _fwd * float(mount_spec.get('seat_y', 0.0)))
     p('    升空 %.0f 格 / 前移 %.0f 格 / 转身 %.0f° / 侧倾 %.0f°'
       % (float(mo_spec.get('lift', 0)), float(mo_spec.get('travel', 0)),
          float((mo_spec.get('turn') or {}).get('amount', 0)),
          float((mo_spec.get('bank') or {}).get('scale', 0))))
 
-    # ② 姿态
+    # ①b 坐骑的跟随已经在 ① 的逐帧循环里写了（不挂父级，避免继承侧倾）
+    if mount_arm is not None:
+        p('    坐骑跟随已烘焙（相对骑手 y=%.2f z=%.2f）'
+          % (float(mount_spec.get('seat_y', 0.0)), -mount_seat))
+
+    # ② 姿态（给了 cycle 段就只写半个循环，剩下的自动镜像/复制/闭环）
     poses = recipe.get('poses') or {}
+    cyc = recipe.get('cycle') or {}
+    if cyc and poses:
+        cyc_len = int(cyc.get('length', 32))
+        cyc_rep = max(1, int(cyc.get('repeats', 1)))
+        poses = expand_cycle(poses, cyc)
+        p('\n[2a] 循环：半循环 %d 帧 × %d 遍 = %d 帧、%d 根骨骼'
+          % (cyc_len // 2, cyc_rep, cyc_len * cyc_rep, len(poses)))
+        if cyc_len * cyc_rep > total:
+            p('    !! 循环共 %d 帧 > 总帧数 %d，尾巴会被截掉'
+              % (cyc_len * cyc_rep, total))
     if poses:
-        p('\n[2] 姿态：%d 根骨骼' % len(poses))
+        p('\n[2b] 姿态：%d 根骨骼' % len(poses))
         PB = arm.pose.bones
         n = 0
-        for name, seq in poses.items():
+        for key_name, seq in poses.items():
+            is_loc = key_name.endswith('@loc')
+            name = key_name[:-4] if is_loc else key_name
             pb = PB.get(name)
             if not pb:
                 p('    !! 没骨骼 %s' % name)
                 continue
-            pb.rotation_mode = 'XYZ'
-            for f, xyz in seq:
+            if not is_loc:
+                pb.rotation_mode = 'XYZ'
+                # BPS Rig：Top Leg / Top Arm 上挂着 "FK <-> IK" 开关，
+                # 值是 1（IK）时 FK 旋转**完全无效** —— 只打关键帧不会报错，
+                # 但渲染出来角色像滑冰。用 poses 驱动就必须先关回 FK。
+                try:
+                    if 'FK <-> IK' in pb.keys():
+                        pb['FK <-> IK'] = 0.0
+                except Exception:
+                    pass
+            for f, v in seq:
                 ctx['sc'].frame_set(int(f))
-                pb.rotation_euler = [math.radians(v) for v in xyz]
-                pb.keyframe_insert('rotation_euler', frame=int(f))
+                if is_loc:
+                    pb.location = [float(x) for x in v]
+                    pb.keyframe_insert('location', frame=int(f))
+                else:
+                    pb.rotation_euler = [math.radians(x) for x in v]
+                    pb.keyframe_insert('rotation_euler', frame=int(f))
             n += 1
         p('    %d 根打了关键帧' % n)
+        # 接触帧设线性：不设的话 Blender 的默认缓入缓出会把脚拖回来（脚滑）
+        if cyc and cyc.get('linear', 'contact'):
+            cyc_len = int(cyc.get('length', 32))
+            cyc_rep = max(1, int(cyc.get('repeats', 1)))
+            spec = cyc.get('linear', 'contact')
+            base_f = [0, cyc_len // 2] if spec == 'contact' else [int(x) for x in spec]
+            frames = [float(b + k * cyc_len)
+                      for k in range(cyc_rep) for b in base_f]
+            p('    接触帧改线性插值：%d 个关键帧' % mark_linear(arm, frames))
 
     # ③ 武器
     w = recipe.get('weapon') or {}
@@ -858,11 +1333,25 @@ def build(recipe, out_dir, total=None, fps=None):
         for it in fx:
             kind = it.get('type')
             fn = FX.get(kind)
-            if fn is None:
-                p('    !! 不认识的特效类型: %s（可用 %s）' % (kind, '/'.join(FX)))
+            if fn is not None:
+                fn(ctx, it, mo)
+                p('    - %s ✔' % kind)
                 continue
-            fn(ctx, it, mo)
-            p('    - %s ✔' % kind)
+            # 内置五种之外的，交给 fx_kit（wind/glow_eyes/embers/teleport/
+            # spawn_in/splash/fog_gate），参数原样透传
+            try:
+                from fx_kit import FX_REGISTRY
+                fk = FX_REGISTRY.get(kind)
+                if fk is None and kind in ('glow', 'eyes'):
+                    fk = FX_REGISTRY.get('glow_eyes')
+                if fk is None:
+                    p('    !! 不认识的特效类型: %s（内置 %s + fx_kit %s）'
+                      % (kind, '/'.join(FX), '/'.join(FX_REGISTRY)))
+                    continue
+                fk(ctx['sc'], ctx, {k: v for k, v in it.items() if k != 'type'})
+                p('    - %s ✔（fx_kit）' % kind)
+            except Exception as _e:
+                p('    !! 特效 %s 失败：%s' % (kind, _e))
 
     # ⑤ 相机
     p('\n[5] 摄影机')
@@ -875,9 +1364,52 @@ def build(recipe, out_dir, total=None, fps=None):
     p('\n[6] 布光')
     follow_lights(ctx, recipe.get('lights') or {}, mo, cam_info)
 
+    # ⑥b 布景（贴地动作要清地形 + 铺地，飞天的片子别开）
+    stage_spec = recipe.get('stage')
+    if stage_spec:
+        p('\n[6b] 布景')
+        clean_stage(ctx, stage_spec)
+        for _ob in bpy.data.objects:
+            if _ob.name.lower().startswith(('panda', 'fox')):
+                p('    坐骑对象 %s 父=%s 世界=(%.1f,%.1f,%.1f) 尺寸=%s hide=%s'
+                  % (_ob.name, _ob.parent.name if _ob.parent else '-',
+                     _ob.matrix_world.translation.x, _ob.matrix_world.translation.y,
+                     _ob.matrix_world.translation.z,
+                     tuple(round(v, 2) for v in _ob.dimensions), _ob.hide_render))
+
     # ⑦ 渲染设置
     p('\n[7] 渲染设置')
-    setup_render(ctx, recipe.get('render') or {}, out_dir)
+    render_spec = recipe.get('render') or {}
+    setup_render(ctx, render_spec, out_dir)
+    # 预设（thumbnail / bilibili / cycles_hq / quick）在最上面覆盖一遍
+    if render_spec.get('preset'):
+        try:
+            import sys as _sys
+            _py = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if _py not in _sys.path:
+                _sys.path.insert(0, _py)
+            import render_presets
+            got = render_presets.apply_preset(ctx['sc'], render_spec['preset'],
+                                             render_spec.get('preset_spec') or {})
+            p('    预设 %s → %s / %s / %s 采样'
+              % (render_spec['preset'], got.get('engine'),
+                 got.get('res'), got.get('samples')))
+        except Exception as _e:
+            p('    !! 渲染预设 %r 失败：%s' % (render_spec.get('preset'), _e))
+
+    # ⑥c 相机能力（抖动 / 环绕 / 镜头切换 / 天空延时）
+    cam_spec = recipe.get('camera') or {}
+    cam_ops = cam_spec.get('ops') or []
+    if cam_ops:
+        try:
+            from camera_kit import apply_cam_ops
+            cam_ob = ctx['sc'].camera
+            done = apply_cam_ops(ctx['sc'], cam_ob, ctx, cam_ops)
+            names = [d.get('op', str(d)) if isinstance(d, dict) else str(d)
+                     for d in (done or [])]
+            p('    相机能力：%s' % ', '.join(names))
+        except Exception as _e:
+            p('    !! 相机能力失败：%s' % _e)
 
     blend_name = recipe.get('blend_name') or '动画.blend'
     blend = os.path.join(out_dir, blend_name)

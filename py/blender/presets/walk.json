@@ -1,0 +1,75 @@
+{
+  "name": "walk",
+  "title": "行走循环 —— T14：接触帧镜像 + 线性接触帧 + 匀速根位移",
+  "blend_name": "行走循环.blend",
+  "fps": 24,
+  "duration": 128,
+
+  "motion": {
+    "type": "ground",
+    "az": 20,
+    "speed": 0.0705,
+    "start": 1,
+    "bob": {"amount": 0.075, "cycle": 16}
+  },
+
+  "cycle": {
+    "length": 32,
+    "repeats": 4,
+    "mirror": true,
+    "linear": "contact"
+  },
+
+  "poses": {
+    "Torso":        [[0, [6, 0, 0]],   [8, [4, 0, 0]]],
+    "Head":         [[0, [-4, 0, 0]],  [8, [-3, 0, 0]]],
+
+    "Top Leg.R":    [[0, [-26, 0, 0]], [8, [-6, 0, 0]]],
+    "Bottom Leg.R": [[0, [8, 0, 0]],   [8, [16, 0, 0]]],
+    "Fancy Feet.R": [[0, [-16, 0, 0]], [8, [-6, 0, 0]]],
+
+    "Top Leg.L":    [[0, [20, 0, 0]],  [8, [-4, 0, 0]]],
+    "Bottom Leg.L": [[0, [26, 0, 0]],  [8, [10, 0, 0]]],
+    "Fancy Feet.L": [[0, [18, 0, 0]],  [8, [4, 0, 0]]],
+
+    "Top Arm.R":    [[0, [30, 0, 0]],  [8, [14, 0, 0]]],
+    "Bottom Arm.R": [[0, [-20, 0, 0]], [8, [-14, 0, 0]]],
+    "Top Arm.L":    [[0, [-32, 0, 0]], [8, [-16, 0, 0]]],
+    "Bottom Arm.L": [[0, [-22, 0, 0]], [8, [-16, 0, 0]]]
+  },
+
+  "stage": {
+    "hide_world": true,
+    "ground": {"size": 200, "tile": 4.0,
+               "a": [0.42, 0.46, 0.38], "b": [0.36, 0.40, 0.33]}
+  },
+
+  "camera": {
+    "az":   [[1, 265.0], [128, 261.0]],
+    "dist": [[1, 7.4],   [128, 8.0]],
+    "lens": [[1, 45.0],  [128, 50.0]],
+    "rise": [[1, 0.0]],
+    "z_base": 1.65,
+    "aim_h": 1.05,
+    "dof": 2.8,
+    "key_step": 2
+  },
+
+  "lights": {
+    "key_step": 4,
+    "fill": {"energy": 700.0, "size": 5.0, "color": [0.88, 0.93, 1.0],
+             "forward": 2.0, "up": 1.1}
+  },
+
+  "render": {
+    "res": "1280x720",
+    "samples": 32,
+    "exposure": 0.0,
+    "motion_blur": 0.35,
+    "view_transform": "AgX",
+    "look": "AgX - Punchy",
+    "sky": [[1, null], [128, 0.20]],
+    "hide_fog": true,
+    "frame_prefix": "frame_"
+  }
+}
