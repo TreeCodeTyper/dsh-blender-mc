@@ -12,6 +12,11 @@ and **it checks its own output before showing it to you**.
 [![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](package.json)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](py/)
 
+> Maintaining this repo? Read **[docs/交接.md](docs/交接.md)** first (Chinese) — §3 explains
+> which of the three source trees is the real one, and why editing `node_modules/dsh-blender-mc`
+> is a trap.
+
+
 English · [中文](README.md)
 
 </div>

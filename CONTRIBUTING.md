@@ -282,6 +282,10 @@ BPS V4 带两套手臂（经典 + Alex 细手臂），后者没被摆位、
 
 ## 本地开发
 
+> ⚠️ **先读 [交接文档 §3：三棵源码树](docs/交接.md#3--三棵源码树谁是真身)。**
+> 改代码只改仓库；`node_modules/dsh-blender-mc` 是安装出来的生产副本，
+> 在那里改的东西既进不了 git，也会在下次安装时被覆盖。
+
 ### 挂成 DSH 开发插件
 
 在 `~/.dsh/profiles/<profile>/package.json` 里：
@@ -305,8 +309,8 @@ BPS V4 带两套手臂（经典 + Alex 细手臂），后者没被摆位、
 node scripts/smoke.mjs
 ```
 
-它会用一个假的 `ctx` 调 `apply()`，检查 6 个工具都注册上了、`apply` 不抛异常。
-**不用启动 DSH 就能验证插件外壳。**
+它会用一个假的 `ctx` 调 `apply()`，检查工具是否都注册上了（目前 9 个）、`apply` 不抛异常。
+**不用启动 DSH 就能验证插件外壳。** 新增工具时记得同步 `scripts/smoke.mjs` 里的 `EXPECTED`。
 
 ### 只测 Python 侧
 
