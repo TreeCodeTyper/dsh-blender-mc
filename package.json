@@ -1,7 +1,7 @@
 {
   "name": "dsh-blender-mc",
-  "version": "0.5.3",
-  "description": "Minecraft 存档 -> Blender 封面与 10 秒动画：自动挑机位、导出几何、搭场景、渲染，再用 OpenCV 审图（朝向/接地/曝光/布光/景深），不合格自动调参重渲。支持在 DSH 设置页上传地图 zip 与人物皮肤。",
+  "version": "0.5.4",
+  "description": "Minecraft 存档 → Blender 封面 / 动画：自动挑机位（地形 + 太阳方向）、MCprep 材质 + BPS 骨架 + 三点布光 + AgX 合成器后期；渲完用 OpenCV 审 8 项、不合格自动重渲。同一套场景可出 10 秒动画与分镜片。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
