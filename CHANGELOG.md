@@ -6,6 +6,33 @@
 
 ---
 
+## [0.5.3] - 2026-10-31
+
+**纯文档与仓库卫生修复，出图行为与 0.5.2 完全一致**（同一份 `build_cover.py` / `pipeline.py`）。
+
+### 新增
+
+- **`docs/交接.md`**：接手这份代码前必读。§3 讲清「三棵源码树」（仓库 / 生产安装目录 /
+  工作区副本）谁是真身、哪棵能改，并复盘了 0.4.9 在三个地方变成三份代码的事故；
+  另含五步管线与画质参数表（每项都写为什么）、审图判据的三个已知误报、
+  SemVer 在本仓库的落地（默认观感变化 → MINOR）、发版流程、验收四连、排障速查。
+
+### 修复
+
+- **`package.json` 曾被打成 GBK 乱码 + BOM**：Windows PowerShell 5.1 的
+  `Get-Content/Set-Content` 按 ANSI 读写 UTF-8，把 `description` 转成乱码并注入 BOM，
+  `node` 报 `Invalid package config`、`npm publish` 也会直接失败。已恢复干净副本，
+  并把坑写进交接文档的排障表。
+- **`scripts/smoke.mjs` 的 `EXPECTED` 少了 `mc_mobs`**：第 9 个工具注册成功却一直报
+  「多出未在 EXPECTED 里的工具」。补上后 9 个工具全部对齐。
+- **README 目录结构停在 0.4.6**：补齐 `lib/map-*.js`、`post_grade.py`、`camera_kit.py`、
+  `fx_kit.py`、`mobs.py`、`render_presets.py`；「常用参数」默认值对齐 0.5.x
+  （`--cam-az` 自动、`--dist 15`、AgX、`--trees`）。
+- **本仓库自 0.4.6 起没再推过 GitHub**：`camera_kit.py` / `fx_kit.py` / `mobs.py` /
+  `render_presets.py` / 4 份动画配方，以及生产目录独有的 `map-resolve.js`、
+  `shoot-params.js`、`post_grade.py`、`FIX_NOTES.md`、`NEW_PARAMS.md` 从未入库。
+  本次全部收编（`c484ab5` 保命提交 + `edaac22` 合入 0.5.2）。
+
 ## [0.5.2] - 2026-10-30
 
 ### 修复
