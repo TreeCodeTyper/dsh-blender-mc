@@ -202,7 +202,7 @@ python py/cli.py shoot "D:/saves/我的世界" --area -2100,-1600,-1400,-900 --o
 
 **DSH → 设置 → 背景地图** → 拖入存档 `.zip`（或点「选择文件」）。
 
-- 单个 zip 上限 **2 GB**，解压后上限 **6 GB** —— 原版整合包地图（几百 MB 到 1 GB）够用
+- 上传 zip 单包上限 **1 GB**，解压后上限 **8 GB**；更大的地图请用「读取本地存档」，直接读原目录、不复制 `.mca`
 - zip 里套一层文件夹也能认（比如 `方可梦世界/新的世界/level.dat`）
 - 一次上传里如果有多个存档，会让你点选要哪一个
 - 传完会出现在列表里，带缩略图（能读到 `icon.png` 就用它）、MC 版本、坐标范围；
@@ -229,6 +229,77 @@ python py/cli.py map resolve --name 方可梦        # 打印 savePath / area / 
 ```
 
 数据都在 `%USERPROFILE%\.dsh\blender-mc\maps\` 下，一个地图一个目录，删插件不删地图。
+
+### 第 6 步（可选）：把存档装成可编辑的 Blender 背景地图
+
+出封面是「角色 + 机位 + 渲染」的一条龙。如果你只想**要一张能继续编辑的地图工程**，
+用 `mc_map_import`：它不建角色、不审图，只把地形装进 Blender，整理成
+`MAP` / `LIGHTS` / `CAMERA` 三个集合，保存成 `.blend`。
+
+```jsonc
+// 从地图库点名；不给 area 就按 region 主簇自动算
+{ "map": "方可梦世界", "out": "E:/背景地图/方可梦", "radius": 96 }
+
+// 也可以直接给存档目录
+{ "save": "D:/saves/新的世界", "area": "-2100,-1600,-1400,-900",
+  "center": "-2016,-1197", "out": "E:/背景地图/新的世界", "preview": true }
+```
+
+命令行等价：
+
+```bash
+python py/cli.py map-import --map "方可梦世界" --out ./背景地图 --open
+python py/cli.py map-import --save "D:/saves/新的世界" --area -2100,-1600,-1400,-900 \
+  --center -2016,-1197 --out ./背景地图 --res 1920x1080 --samples 64
+```
+
+- 产物：`<out>/背景_世界.blend`（可在 `--name` 改名）、`预览.png`、`导入信息.json`
+- 打开工程后先选 `MAP` 集合，角色/动画照常从 `mc_shoot` 的封面工程里拿
+- 地形导出有缓存（`_export_cache.json`，按存档 mtime + 区域 + 半径 + Y 范围算 key），
+  同一块地第二次是秒开；要重导加 `--force`
+- 材质：装了 MCprep 就走 `prep_materials`；没装/注册失败会自动退回内置的
+  「贴图 + 群系乘色 + 调平粗糙度」，草地不会发白
+- 参考了 MCprep / Mineways / MiBlend / MCBlend 公开的「OBJ 世界导入 → 准备材质 →
+  归入 MAP 集合」工作流；本项目的存档解析、区域计算、导出、缓存、场景组织是原创实现，
+  不分发也不依赖这些插件，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+
+### 第 7 步（可选）：提示词 → AI 人偶（实验性 M1）
+
+`mc_ai_char` 不是生图。它先把提示词编译成一份可检查的 `CharacterSpec`：
+
+```jsonc
+{
+  "action": "sit",
+  "pelvis": { "height": 0.15 },
+  "legs": {
+    "left":  { "foot": [0.20, -0.44, 0.0], "knee_hint": [0.25, -0.50, 0.60] },
+    "right": { "foot": [-0.20, 0.20, 0.0],  "knee_hint": [-0.25, 0.28, 0.50] }
+  },
+  "arms": { "left": { "hand": [0.18, -0.38, 0.42] } },
+  "head": { "yaw": 10, "roll": 8 },
+  "face": { "expression": "calm" },
+  "camera": { "framing": "9:16", "azimuth": 20, "distance": 7.0, "lens": 70 }
+}
+```
+
+再用原创的 `py/blender/ai_rig.py` 驱动骨架渲染；`spec.json` 会一起落盘，
+模型/agent 可以检查或改 spec，而不是重写骨骼角度。
+
+```jsonc
+{ "prompt": "9:16 editorial portrait, sitting on floor, one knee up, calm, soft side light",
+  "out": "E:/人偶测试", "skin": "alex" }
+```
+
+```bash
+python py/cli.py ai-char --prompt "坐在地上，一条腿弯，一条腿放松，柔和侧光" --skin alex --out ./人偶测试
+```
+
+- 产物：`spec.json`、`人偶.png`；首次按皮肤在输出目录构建并缓存 `AI_Character_Rig_v0.3_steve.blend` / `_alex.blend`
+- 皮肤：`steve`（默认）/ `alex` / 自己的 64×64 PNG 路径；内置皮肤在 `assets/skins/`
+- 动作：`sit/run/jump/wave/point/stand`；画幅：`9:16/16:9/1:1/4:5`
+- M1 仍是程序化方块人，脸来自 64×64 皮肤，但还没有表情骨；写实人脸/服装不在本版
+- 设计参考 BPS / BSS / Simple / Mob / MiBlend / MCBlend 的公开思路，
+  骨骼、网格、权重与控制代码原创，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
 
 ---
 
@@ -350,7 +421,7 @@ python py/cli.py anim 封面.blend --preset <新名字> --out .\out
 
 > 用我上传的「方可梦世界」出三张不同机位的封面
 
-模型会自己判断该调哪个工具（`mc_doctor` / `mc_extract_models` / `mc_scan` / `mc_shoot` / `mc_anim` / `mc_film` / `mc_check`）。
+模型会自己判断该调哪个工具（`mc_doctor` / `mc_extract_models` / `mc_scan` / `mc_camera_path` / `mc_shoot` / `mc_search` / `mc_map_import` / `mc_ai_char` / `mc_anim` / `mc_film` / `mc_check` / `mc_mobs`）。
 上传过的地图可以直接用 `map` 参数点名（见[第 5 步](#第-5-步可选把你的地图传进-dsh)），不用报路径。
 
 ### 自带模型（可选）
@@ -408,12 +479,12 @@ python py/cli.py shoot "D:/saves/我的世界" --area -2100,-1600,-1400,-900 --o
 ```
 dsh-blender-mc/
 ├── lib/
-│   ├── index.js              DSH 插件外壳：注册 9 个工具，调 Python
+│   ├── index.js              DSH 插件外壳：注册 13 个工具，调 Python
 │   ├── map-routes.js         设置页 HTTP 路由（地图/皮肤上传）
 │   ├── map-resolve.js        存档目录解析（region 版式 / 26.x dimensions 版式）
 │   └── shoot-params.js       设置页参数 → CLI 参数 / 环境变量
 ├── py/
-│   ├── cli.py                命令行入口（doctor/setup/scan/shoot/anim/film/check/map/mobs/extract）
+│   ├── cli.py                命令行入口（doctor/setup/scan/shoot/map-import/anim/film/check/map/mobs/extract）
 │   ├── pipeline.py           ★ 编排 + 审图闭环 + auto_adjust + 子进程素材路径注入
 │   ├── film.py               ★ 分镜成片：多镜头 → 重编号 → 拼接 + 分镜表.md
 │   ├── vision_check.py       ★ OpenCV 审图（朝向/接地/曝光/布光/构图/景深）
@@ -429,7 +500,9 @@ dsh-blender-mc/
 │   ├── anvil.py              读 .mca（纯标准库，不需要 Blender）
 │   └── blender/              ← 只在 Blender 里跑（bpy），不能 import cv2
 │       ├── _compat.py        ★ Blender 版本兼容层
-│       ├── export_obj.py     存档 → OBJ
+│       ├── export_obj.py     存档 → OBJ（--textures / DSH_MC_TEXTURES）
+│       ├── import_map.py     ★ 背景地图：OBJ → MAP/LIGHTS/CAMERA 的 .blend
+│       ├── face_kit.py       ★ 表情：BPS 面板骨 + 3D 眼/眉/眼皮
 │       ├── build_cover.py    ★ 封面主脚本：天空/雾/布光/相机/姿态/渲染
 │       ├── post_grade.py     ★ 合成器调色（0.5.0 起）：Bloom + 饱和 + 暗角
 │       ├── camera_kit.py     电影机位（分镜、运镜）

@@ -307,33 +307,16 @@ try:
 except Exception as _e:
     p(f"    !! 运动模糊不可用: {_e}")
 # 辉光：EEVEE 没有 bloom，用合成器 Glare（Fog Glow）给能量环/刃片做溢光
-# ⚠️ Blender 5.x 把合成器节点树挪到了 scene.compositing_node_group，
-#    4.x 及更早是 scene.node_tree —— 两个都试，都没有就跳过（不影响出图）。
+# ⚠️ Blender 5.x 的合成器是 socket 化的（输出叫 GROUP_OUTPUT、Glare 的属性
+#    挪进了 socket）；版本差异与“装不上就旁路”全在 glare_compat 里处理，
+#    保证不会留下断链的合成树（那会输出整帧纯灰）。
 try:
-    nt = None
-    for attr in ('node_tree', 'compositing_node_group'):
-        cand = getattr(sc, attr, None)
-        if cand is not None and hasattr(cand, 'nodes'):
-            nt = cand
-            break
-    if nt is None:
-        raise RuntimeError('这个版本没有可用的合成器节点树')
-    for n in list(nt.nodes):
-        if n.type == 'GLARE':
-            nt.nodes.remove(n)
-    rl = next(n for n in nt.nodes if n.type == 'R_LAYERS')
-    comp = next(n for n in nt.nodes if n.type == 'COMPOSITE')
-    gl = nt.nodes.new('CompositorNodeGlare')
-    gl.glare_type = 'FOG_GLOW'
-    gl.quality = 'HIGH'
-    gl.threshold = 1.0
-    gl.size = 7
-    gl.mix = -0.35
-    nt.links.new(rl.outputs['Image'], gl.inputs['Image'])
-    nt.links.new(gl.outputs['Image'], comp.inputs['Image'])
-    p("    合成器 Glare: Fog Glow / threshold 1.0 / size 7")
+    from glare_compat import install_glare
+    if install_glare(sc, {"type": "FOG_GLOW", "threshold": 1.0,
+                          "size": 7, "mix": -0.35}, log=p):
+        p("    合成器 Glare: Fog Glow / threshold 1.0 / size 7")
 except Exception as _e:
-    p(f"    !! 辉光节点不可用: {_e}")
+    p(f"    !! 辉光节点不可用: {type(_e).__name__}: {_e}")
 
 # 运镜：10 秒缓慢推进 + 轻微升高（原来相机完全静止，视频像一张会动的静帧）
 cam = sc.camera

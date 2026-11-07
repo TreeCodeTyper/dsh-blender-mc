@@ -56,10 +56,10 @@ RESERVED = set('con prn aux nul'.split()) | {'com%d' % i for i in range(1, 10)} 
            {'lpt%d' % i for i in range(1, 10)} | {'clock$'}
 
 DEFAULTS = {
-    'max_zip_bytes': 2048 * MIB,      # 单个 zip 上限 2 GiB
-    'max_unpacked': 6144 * MIB,       # 解压总量上限 6 GiB
-    'max_entries': 200000,            # 条目数上限
-    'max_entry': 1024 * MIB,          # 单条目上限 1 GiB
+    'max_zip_bytes': 1024 * MIB,      # 单个 zip 上限 1 GiB（更大的请用本机存档直读）
+    'max_unpacked': 8192 * MIB,       # 解压总量上限 8 GiB
+    'max_entries': 400000,            # 条目数上限（大型整合包 region 很多）
+    'max_entry': 4096 * MIB,          # 单条目上限 4 GiB
     'max_ratio': 100,                 # 单条目压缩比上限（防炸弹）
     'max_depth': 12,                  # 路径深度上限
     'max_path': 240,                  # 相对路径长度上限
@@ -288,7 +288,7 @@ def _extract_zip(zip_path, dest, limits, on_stage=None):
             try:
                 with zf.open(info) as src, open(target, 'wb') as dst:
                     while True:
-                        buf = src.read(MIB)
+                        buf = src.read(4 * MIB)
                         if not buf:
                             break
                         total += len(buf)
@@ -859,6 +859,106 @@ def _norm_sha(s):
     return None
 
 
+
+def default_saves_dir():
+    """本机 Minecraft saves 目录（Windows %APPDATA% / 其他平台 ~/.minecraft）。"""
+    env = os.environ.get('MINECRAFT_SAVES')
+    if env and os.path.isdir(env):
+        return os.path.abspath(env)
+    appdata = os.environ.get('APPDATA')
+    if appdata:
+        p = os.path.join(appdata, '.minecraft', 'saves')
+        if os.path.isdir(p):
+            return os.path.abspath(p)
+    p = os.path.expanduser(os.path.join('~', '.minecraft', 'saves'))
+    if os.path.isdir(p):
+        return os.path.abspath(p)
+    return os.path.abspath(p)
+
+def import_local_many(path=None, root=None):
+    """读取 saves 目录下所有世界；如果传入的是单个世界目录，就只读它。"""
+    root = root or default_root()
+    path = os.path.abspath(path or default_saves_dir())
+    if not os.path.isdir(path):
+        raise MapError('map.no-dir', '本地存档目录不存在：%s' % path, status=400)
+    if _level_dat_in(path):
+        candidates = [path]
+    else:
+        try:
+            entries = sorted(os.scandir(path), key=lambda e: e.name.lower())
+        except OSError as e:
+            raise MapError('map.no-dir', '读不了目录：%s（%s）' % (path, e), status=400)
+        candidates = [e.path for e in entries if e.is_dir() and _level_dat_in(e.path)]
+    if not candidates:
+        raise MapError('save.no-worlds',
+                       '这个目录下没有找到带 level.dat 的世界：%s' % path, status=400)
+    maps = []
+    errors = []
+    for child in candidates:
+        try:
+            maps.append(import_local(child, None, root))
+        except MapError as e:
+            if e.code == 'map.duplicate':
+                idx = read_index(root)
+                existing = next((m for m in idx.get('maps', {}).values()
+                                 if os.path.abspath(m.get('savePath') or '') == child), None)
+                if existing:
+                    maps.append(existing)
+                    continue
+            errors.append({'path': child, 'code': e.code, 'message': e.message})
+    if not maps:
+        raise MapError('save.no-worlds',
+                       '找到世界目录但都没有导入成功：%s' % path, status=400)
+    return {'root': path, 'maps': maps, 'errors': errors}
+
+
+def import_local(path, name=None, root=None):
+    """登记本机存档目录（不复制 .mca，只写索引）。"""
+    import hashlib
+    root = root or default_root()
+    ensure_dirs(root)
+    path = os.path.abspath(path)
+    if not os.path.isdir(path):
+        raise MapError('map.no-dir', '本机存档目录不存在：%s' % path, status=400)
+    if not _level_dat_in(path):
+        raise MapError('save.not-found', '这个目录里没有 level.dat：%s' % path, status=400)
+    region_rel, region_abs, _ = find_region_dir(path)
+    regions, bounds, _ = _region_stats(path, region_abs)
+    if regions == 0:
+        raise MapError('save.no-region', '存档里一个 region 文件都没有：%s' % path, status=400)
+    level = read_level_dat(path)
+    spawn = level.get('spawn')
+    area = suggest_area(bounds, spawn)
+    if not area:
+        raise MapError('save.no-region', '算不出世界范围，无法推荐机位', status=400)
+    map_id = 'm_' + hashlib.sha256(path.encode('utf-8')).hexdigest()[:12]
+    idx = read_index(root)
+    if map_id in idx['maps']:
+        raise MapError('map.duplicate', '这个目录已经登记过了（%s）' % idx['maps'][map_id].get('name'), status=409)
+    dest = _map_dir(root, map_id)
+    os.makedirs(dest, exist_ok=True)
+    thumb = 'thumb.png'
+    has_thumb = _grab_thumb(path, os.path.join(dest, thumb), DEFAULTS)
+    clean_name = _sanitize_name(name or level.get('levelName') or os.path.basename(path))
+    ts = now_ms()
+    meta = {
+        'id': map_id, 'name': clean_name, 'sourceFilename': path,
+        'sizeBytes': 0, 'sha256': '', 'createdAt': ts, 'updatedAt': ts,
+        'savePath': path, 'worldRel': '.', 'levelName': level.get('levelName'),
+        'mcVersion': level.get('mcVersion'), 'dataVersion': level.get('dataVersion'),
+        'lastPlayed': level.get('lastPlayed'), 'spawn': spawn, 'bounds': bounds,
+        'regionCount': regions, 'regionRel': region_rel or 'region',
+        'archives': _archives_of(path, region_rel), 'thumb': thumb if has_thumb else None,
+        'area': area, 'files': 0, 'unpackedBytes': 0,
+        'warnings': ['本机直接读取，没有复制存档'], 'local': True,
+    }
+    _write_json(os.path.join(dest, 'meta.json'), meta)
+    idx['maps'][map_id] = meta
+    if not idx.get('defaultId'):
+        idx['defaultId'] = map_id
+    _write_json(index_path(root), idx)
+    return meta
+
 def import_zip(zip_path, name=None, root=None, sha256=None, source_filename=None,
                limits=None, keep_zip=False):
     """上传主流程：校验 → 解压 → 识别存档 → 入库。返回 meta。"""
@@ -871,7 +971,7 @@ def import_zip(zip_path, name=None, root=None, sha256=None, source_filename=None
     if size <= 0:
         raise MapError('map.empty', '这个文件是空的')
     if size > limits['max_zip_bytes']:
-        raise MapError('map.too-large', 'zip 有 %.1f GiB，超过上限 %.1f GiB'
+        raise MapError('map.too-large', 'zip 有 %.1f GiB，超过上传上限 %.1f GiB；更大的地图请用「读取本地存档」'
                        % (size / 1024.0 ** 3, limits['max_zip_bytes'] / 1024.0 ** 3),
                        status=413)
 
@@ -1066,10 +1166,12 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     ap = argparse.ArgumentParser(prog='mc_maplib', description='背景地图库')
     ap.add_argument('action', nargs='?', default='list',
-                    choices=['import', 'list', 'get', 'rename', 'delete', 'default',
+                    choices=['import', 'local', 'list', 'get', 'rename', 'delete', 'default',
                              'doctor', 'resolve'])
     ap.add_argument('--root', default=None)
     ap.add_argument('--zip', default=None)
+    ap.add_argument('--path', default=None)
+    ap.add_argument('--all', action='store_true', help='扫描目录下所有世界')
     ap.add_argument('--job', default=None, help='JSON 任务文件（由 Node 侧写，免转义）')
     ap.add_argument('--id', default=None)
     ap.add_argument('--name', default=None)
@@ -1081,6 +1183,7 @@ def main(argv=None):
         job = _read_json(a.job, None) or {}
         a.root = job.get('root') or a.root
         a.zip = job.get('zip') or a.zip
+        a.path = job.get('path') or a.path
         a.name = job.get('name') if job.get('name') is not None else a.name
         a.id = job.get('id') or a.id
         a.sha256 = job.get('sha256') or a.sha256
@@ -1097,6 +1200,10 @@ def main(argv=None):
                                                  'message': '缺少 --zip', 'params': {}}}, a.json)
         return _run(import_zip, a.json, zip_path=a.zip, name=a.name, root=root,
                     sha256=a.sha256, source_filename=getattr(a, 'source', None))
+    if a.action == 'local':
+        if a.all or not a.path:
+            return _run(import_local_many, a.json, path=a.path, root=root)
+        return _run(import_local, a.json, path=a.path, name=a.name, root=root)
     if a.action == 'list':
         return _run(list_maps, a.json, root=root)
     if a.action == 'get':

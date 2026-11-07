@@ -31,7 +31,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from anvil import World, read_player                  # noqa: E402              # noqa: E402
 
-TEX_SRC = r"E:\游戏与自媒体\AI自媒体工作区\03_素材库\方块贴图\minecraft\block"
+# 贴图目录：优先环境变量 / --textures，最后才用旧的开发机路径。
+# 以前这里写死 E:\...，换台机器或移动素材库就会整片地形丢贴图。
+_DEFAULT_TEX_SRC = r"E:\游戏与自媒体\AI自媒体工作区\03_素材库\方块贴图\minecraft\block"
+TEX_SRC = os.environ.get('DSH_MC_TEXTURES') or _DEFAULT_TEX_SRC
 
 # 群系染色（MC 官方 tint 表，平原/森林系）
 TINT = {
@@ -228,11 +231,21 @@ def main():
     ap.add_argument('--horizon', type=int, default=0)
     ap.add_argument('--center', default=None)
     ap.add_argument('--name', default='世界')
+    ap.add_argument('--textures', default=None,
+                    help='方块贴图目录（默认读 DSH_MC_TEXTURES，再退回内置路径）')
     ap.add_argument('--no-cull', action='store_true')
     ap.add_argument('--bake-tint', action='store_true',
                     help='把群系染色烘进贴图。默认关——MCprep 会自己做，'
                          '烘了反而让它按材质名认不出方块')
     a = ap.parse_args()
+
+    global TEX_SRC
+    if a.textures:
+        TEX_SRC = a.textures
+    if not os.path.isdir(TEX_SRC):
+        raise SystemExit(
+            '找不到方块贴图目录：%s\n'
+            '用 --textures 指定，或设 DSH_MC_TEXTURES。' % TEX_SRC)
 
     os.makedirs(a.outdir, exist_ok=True)
     t0 = time.time()

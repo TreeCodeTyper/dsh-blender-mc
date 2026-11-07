@@ -240,20 +240,190 @@ def step_scan(save, area, y=(50, 200), radius=15, az_step=30, top_n=12,
     return shots
 
 
+def _save_stamp(save):
+    """存档的轻量版本号：level.dat + 所有 region 文件的最后修改时间。
+
+    导出缓存用它判断“存档有没有变”，不读区块内容，几毫秒就能算完。
+    """
+    paths = [os.path.join(save, 'level.dat')]
+    try:
+        _, rdir, _ = __import__('maplib').find_region_dir(save)
+        if rdir:
+            paths += [os.path.join(rdir, n) for n in os.listdir(rdir)
+                      if n.endswith('.mca')]
+    except Exception:
+        pass
+    stamps = []
+    for p in paths:
+        try:
+            stamps.append(int(os.path.getmtime(p) * 1000))
+        except OSError:
+            pass
+    return max(stamps) if stamps else 0
+
+
+def _obj_has_geometry(path):
+    """OBJ 至少要有顶点；读前 4MB，避免把 0 网格缓存当成成功。"""
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) < 32:
+            return False
+        with open(path, 'rb') as f:
+            head = f.read(4 * 1024 * 1024)
+        return b'\nv ' in b'\n' + head
+    except Exception:
+        return False
+
+
 def step_export(save, area, center, out_dir, blender=None, radius=44,
-                ymin=56, ymax=90, horizon=150, progress=print):
-    """② 导出 OBJ（这一步只用到 Python，不需要 Blender）"""
+                ymin=56, ymax=90, horizon=150, progress=print,
+                textures=None, force=False):
+    """② 导出 OBJ（这一步只用到 Python，不需要 Blender）
+
+    textures: 方块贴图目录；不给就 resolve_assets() 找。
+    force:    忽略缓存，强制重新导出。
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    obj = os.path.join(out_dir, '世界.obj')
+    cache_path = os.path.join(out_dir, '_export_cache.json')
+    key = {
+        'stamp': _save_stamp(save),
+        'area': list(area) if area else None,
+        'center': [round(float(center[0]), 3), round(float(center[1]), 3)]
+                  if center else None,
+        'radius': int(radius), 'ymin': int(ymin), 'ymax': int(ymax),
+        'horizon': int(horizon),
+    }
+    if not force and os.path.isfile(obj) and os.path.isfile(cache_path):
+        try:
+            with open(cache_path, encoding='utf-8') as f:
+                old = json.load(f)
+            if old == key and _obj_has_geometry(obj):
+                progress(f'    命中导出缓存: {obj}')
+                return obj
+            if old == key and not _obj_has_geometry(obj):
+                progress('    缓存 OBJ 是 0 网格，丢弃并重新导出')
+                for p in (obj, cache_path):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+
+    tex = textures
+    if not tex:
+        try:
+            tex = resolve_assets().get('textures')
+        except Exception:
+            tex = None
     cmd = [sys.executable, os.path.join(BLENDER_DIR, 'export_obj.py'),
            save, out_dir,
            '--radius', str(radius), '--ymin', str(ymin), '--ymax', str(ymax),
            '--horizon', str(horizon),
            '--center', f'{center[0]},{center[1]}']
-    rc, out = run(cmd, log=os.path.join(out_dir, '_export.log'))
-    obj = os.path.join(out_dir, '世界.obj')
+    if tex:
+        cmd += ['--textures', str(tex)]
+    env = dict(os.environ)
+    if tex:
+        env['DSH_MC_TEXTURES'] = str(tex)
+    rc, out = run(cmd, log=os.path.join(out_dir, '_export.log'), env=env)
     if rc != 0 or not os.path.isfile(obj):
         raise RuntimeError(f'导出失败\n{out[-2000:]}')
+    if not _obj_has_geometry(obj):
+        try:
+            os.remove(obj)
+        except OSError:
+            pass
+        raise RuntimeError(
+            '该 area/center 里没有可导出的方块（OBJ 是 0 网格）。'
+            '请换一个落在存档地形内的 area（例如 mc_scan 推荐机位），'
+            '或把 center 指到村庄/建筑附近；不要用主世界地图边界外的坐标。')
+    try:
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            json.dump(key, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
     progress(f'    导出完成: {obj}')
     return obj
+
+
+def step_import_blend(blender_exe, obj, out_dir, name='背景_世界',
+                      res='1280x720', samples=64, preview=True, progress=print):
+    """③ 用原创的 import_map.py 把 OBJ 装成可编辑的 .blend。
+
+    这一步不建角色、不摆机位、不审图：只做地形 + 材质 + 天空 + 灯光 + 相机，
+    目标是让用户打开 Blender 就能在背景地图上继续做动画。
+    """
+    script = os.path.join(BLENDER_DIR, 'import_map.py')
+    args = [blender_exe, '-b', '--factory-startup', '--python', script, '--',
+            obj, out_dir, name, res, str(int(samples)), '1' if preview else '0']
+    rc, out = run(args, log=os.path.join(out_dir, '_import.log'))
+    blend = os.path.join(out_dir, name + '.blend')
+    if rc != 0 or not os.path.isfile(blend):
+        # Blender 的 --python 异常时退出码仍可能是 0，必须按产物判断。
+        raise RuntimeError(f'背景地图工程生成失败\n{out[-2500:]}')
+    png = os.path.join(out_dir, '预览.png')
+    progress(f'    工程: {blend}')
+    if preview and os.path.isfile(png):
+        progress(f'    预览: {png}')
+    return blend, (png if preview and os.path.isfile(png) else None)
+
+
+def import_map(save, area, out_dir, center=None, radius=96, ymin=0, ymax=320,
+               horizon=0, name='背景_世界', res='1280x720', samples=64,
+               preview=True, blender=None, force=False, progress=print):
+    """加载存档 → OBJ → 可编辑的 Blender 背景地图（原创实现）。
+
+    与 mc_shoot 的区别：不建角色、不渲染封面、不自动审图；产物是
+    `<out>/背景_世界.blend`，集合分成 MAP / LIGHTS / CAMERA，可直接继续 K 动画。
+
+    参考了 MCprep / Mineways / MiBlend / MCBlend 公开的「OBJ 世界导入 →
+    准备材质 → 整理 MAP 集合」工作流；本函数与 import_map.py 的存档解析、
+    区域计算、场景组织、缓存都是本项目原创，不分发也不依赖上述插件的代码。
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    out_dir = os.path.abspath(out_dir)
+    area = tuple(int(v) for v in area) if area else None
+
+    # 没给区域：用 region 主簇 + 出生点算一块（和背景地图库的推荐区域同一套逻辑）。
+    if not area:
+        try:
+            import maplib
+            n, bounds, _ = maplib._region_stats(save)
+            info = maplib.read_level_dat(save)
+            a = maplib.suggest_area(bounds, info.get('spawn'), half=192)
+            if a:
+                area = tuple(int(v) for v in a.split(','))
+        except Exception as e:
+            progress(f'    ⚠️ 自动算区域失败: {type(e).__name__}: {str(e)[:80]}')
+    if not area:
+        raise RuntimeError('这个存档没有可用的 region，给 --area x0,x1,z0,z1 再试')
+
+    if center is None:
+        center = ((area[0] + area[1]) // 2, (area[2] + area[3]) // 2)
+    center = (float(center[0]), float(center[1]))
+    radius = int(radius or 96)
+    progress(f'[1/3] 导出地形（中心 {center[0]:.0f},{center[1]:.0f} / 半径 {radius} / '
+             f'Y {ymin}..{ymax}）…')
+    obj = step_export(save, area, center, out_dir, radius=radius,
+                      ymin=ymin, ymax=ymax, horizon=horizon,
+                      textures=None, force=force, progress=progress)
+    progress('[2/3] 搭 Blender 背景地图…')
+    blender_exe = find_blender(blender)
+    blend, png = step_import_blend(blender_exe, obj, out_dir, name=name,
+                                   res=res, samples=samples, preview=preview,
+                                   progress=progress)
+    result = {
+        'save': os.path.abspath(save), 'area': list(area),
+        'center': [center[0], center[1]], 'radius': radius,
+        'ymin': ymin, 'ymax': ymax, 'obj': obj,
+        'blend': blend, 'preview': png, 'name': name,
+        'finished_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    with open(os.path.join(out_dir, '导入结果.json'), 'w', encoding='utf-8') as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+    progress('[3/3] 完成')
+    return result
 
 
 def _png_size(path):
@@ -323,7 +493,11 @@ def step_render(blender_exe, obj, out_dir, params, progress=print):
                           ('hour', 'DSH_HOUR'),
                           ('fog', 'DSH_FOG'),
                           ('armor', 'DSH_ARMOR'),
-                          ('armor_color', 'DSH_ARMOR_COLOR')):
+                          ('armor_color', 'DSH_ARMOR_COLOR'),
+                          ('face', 'DSH_FACE'),
+                          ('pose', 'DSH_POSE'),
+                          ('skin3d', 'DSH_SKIN3D'),
+                          ('skin3d_thick', 'DSH_SKIN3D_THICK')):
         v = params.get(key)
         if v is None:
             continue
@@ -351,6 +525,13 @@ def step_render(blender_exe, obj, out_dir, params, progress=print):
                     _l = _v.strip()
         env['DSH_ITEM_R'] = _r
         env['DSH_ITEM_L'] = _l
+    else:
+        # CLI 的 --item-right / --item-left 走的是 item_r / item_l；
+        # 之前只处理 items，单边参数被静默丢掉（空手也表达不了）。
+        if params.get('item_r') is not None:
+            env['DSH_ITEM_R'] = str(params['item_r'])
+        if params.get('item_l') is not None:
+            env['DSH_ITEM_L'] = str(params['item_l'])
     t0 = time.time()
     rc, out = run(args, log=os.path.join(out_dir, '_build.log'), env=env)
     if rc != 0:
@@ -377,6 +558,7 @@ def step_check(png, progress=print, annotate=None):
       和角色配色容易撞，自动找法在远景里不可靠）。
     """
     box = None
+    head_box = None
     sb = os.path.join(os.path.dirname(os.path.abspath(png)), '_subject_box.json')
     if os.path.isfile(sb):
         try:
@@ -388,12 +570,16 @@ def step_check(png, progress=print, annotate=None):
                 progress(f'    审图框（Blender 投影）: {box}')
             else:
                 progress(f"    ⚠️ Blender 没给出有效审图框: {j.get('notes')}")
+            hb = j.get('head_box')
+            if hb and len(hb) == 4:
+                head_box = tuple(int(v) for v in hb)
+                progress(f'    头部框（Blender 投影）: {head_box}')
         except Exception as e:
             progress(f'    ⚠️ 读 _subject_box.json 失败: {e}')
     else:
         progress('    (没有 _subject_box.json，退回按颜色自动找主体)')
     from vision_check import check_image       # 见文件头 坑 77
-    r = check_image(png, subject_box=box)
+    r = check_image(png, subject_box=box, head_box=head_box)
     if not r.get('ok', True):
         # ⚠️ 坑 78：图片读不出来（半截 png / 被别的程序占着）时 check_image 只回
         #   {'ok': False}，没有 verdict/score。原来下面直接取 r['verdict']，
@@ -643,10 +829,10 @@ def animate(blender_exe, blend, out_dir, total=240, fps=24, kind='aura',
     args = [blender_exe, '-b', blend, '--python', script, '--',
             out_dir, str(total), str(fps), preview or '']
     if recipe:
-        # 配方自己写死了 duration / fps（walk 128 帧、run 80 帧），
-        # 别用命令行默认的 240 把它撑长 —— 传空让配方说了算。
+        # 配方里有 duration，但调用方（mc_anim / mc_film / 提示词）给的时长优先：
+        # anim_kit 会补循环遍数或重定时，不再静默忽略 --frames。
         args = [blender_exe, '-b', blend, '--python', script, '--',
-                out_dir, '', '', preview or '', recipe]
+                out_dir, str(total), str(fps), preview or '', recipe]
     t0 = time.time()
     rc, out = run(args, log=os.path.join(out_dir, '_anim.log'))
     if rc != 0:

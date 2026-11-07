@@ -32,6 +32,9 @@ node_modules/
 # 测试临时目录（scripts/test_extract.py 在沙箱里会退到仓库内）
 scripts/.tmp_extract_test/
 
+# 本机测试产物（封面/动画/报告草稿，动辄几百 MB）
+_scratch/
+
 # npm pack 产物
 *.tgz
 

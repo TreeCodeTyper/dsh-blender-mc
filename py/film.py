@@ -58,6 +58,26 @@ PRESET_ENV_RES = {
     'aura': ('DSH_AURA_RES', 'DSH_AURA_SAMPLES'),
     'killaura': ('DSH_KA_RES', 'DSH_KA_SAMPLES'),
 }
+
+
+def _preset_info(preset):
+    """返回 (脚本名, 产物 .blend 名, 是否 JSON 配方)。
+
+    presets/*.json 是 0.6 的数据驱动动画：run/walk/dash/ride/superman/
+    conduct 等都在这里，不需要为每个动作再加 Python 脚本。
+    """
+    p = os.path.join(pipeline.BLENDER_DIR, 'presets', '%s.json' % preset)
+    if os.path.isfile(p):
+        try:
+            with open(p, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+        return 'animate_recipe.py', data.get('blend_name') or '动画.blend', True
+    if preset in PRESET_SCRIPTS:
+        return PRESET_SCRIPTS[preset], PRESET_BLENDS.get(preset, '动画.blend'), False
+    raise ValueError('不认识的 preset: %r（可选 presets/*.json 或 %s）'
+                     % (preset, '/'.join(PRESET_SCRIPTS)))
 DEFAULTS = {
     'title': '成片', 'fps': 24, 'res': '960x540', 'samples': 24,
     'total': 240, 'preset': 'yujian', 'crf': 18,
@@ -151,6 +171,23 @@ def _shot_print(i, n, s, fps=24.0):
         s['frames'] / float(fps), ('  — ' + tail) if tail else '')
 
 
+def _load_camera_path(plan, base):
+    """分镜表可选 camera_path：json 路径 / {"points":[...]} / 点列。"""
+    src = plan.get('camera_path')
+    if not src:
+        return None
+    if isinstance(src, dict):
+        return src
+    if isinstance(src, list):
+        return {'points': src}
+    p = _resolve(src, base)
+    if not p or not os.path.isfile(p):
+        raise ValueError('分镜表 camera_path 找不到: %r' % src)
+    with open(p, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    return data if isinstance(data, dict) else {'points': data}
+
+
 def film(blender_exe, plan, out_dir, animatic=False, progress=print):
     """跑完整条流水线，返回结果 dict（mp4 路径 / 帧数 / 分镜表）。"""
     out_dir = os.path.abspath(out_dir)
@@ -169,6 +206,7 @@ def film(blender_exe, plan, out_dir, animatic=False, progress=print):
     if not shots:
         raise ValueError('分镜表里没有任何镜头（shots 为空）')
     os.makedirs(out_dir, exist_ok=True)
+    cam_path = _load_camera_path(plan, base)
 
     progress('分镜：%d 个镜头，共 %d 帧 / %.2f 秒，%s @ %d fps%s'
              % (len(shots), sum(s['frames'] for s in shots),
@@ -189,17 +227,18 @@ def film(blender_exe, plan, out_dir, animatic=False, progress=print):
     t0 = time.time()
     for i, s in enumerate(shots, 1):
         preset = s['preset']
-        if preset not in PRESET_SCRIPTS:
-            raise ValueError('不认识的 preset: %r（可选 %s）'
-                             % (preset, '/'.join(PRESET_SCRIPTS)))
+        script_name, blend_name, is_recipe = _preset_info(preset)
         env = os.environ.copy()
         env.update(s['env'])
         key_r, key_s = PRESET_ENV_RES.get(preset, ('', ''))
+        if is_recipe:
+            key_r, key_s = 'DSH_ANIM_RES', 'DSH_ANIM_SAMPLES'
+            env['DSH_ANIM_RECIPE'] = preset
         if key_r:
             env[key_r] = res
         if key_s:
             env[key_s] = str(samples)
-        watch = set(s['env']) | {key_r, key_s}
+        watch = set(s['env']) | {key_r, key_s, 'DSH_ANIM_RECIPE'}
         sig = (preset, tuple(sorted((k, env.get(k)) for k in watch if k)))
         d = os.path.join(work, '%02d_%s' % (i, s['id']))
         os.makedirs(d, exist_ok=True)
@@ -208,17 +247,38 @@ def film(blender_exe, plan, out_dir, animatic=False, progress=print):
             ablend = builds[sig]
             progress('  %s 复用工程 %s' % (s['id'], os.path.basename(os.path.dirname(ablend))))
         else:
-            script = os.path.join(pipeline.BLENDER_DIR, PRESET_SCRIPTS[preset])
+            script = os.path.join(pipeline.BLENDER_DIR, script_name)
             cmd = [blender_exe, '-b', blend_src, '--python', script, '--',
                    d, str(total), str(int(fps)), '']
+            if is_recipe:
+                cmd.append(preset)
             rc, out = pipeline.run(cmd, log=os.path.join(d, '_build.log'), env=env)
             if rc != 0:
                 raise RuntimeError('镜头 %s 建工程失败（preset=%s）\n%s'
                                    % (s['id'], preset, out[-1800:]))
-            ablend = os.path.join(d, PRESET_BLENDS.get(preset, '动画.blend'))
+            ablend = os.path.join(d, blend_name)
             if not os.path.exists(ablend):
                 raise RuntimeError('镜头 %s 建工程后没找到 %s' % (s['id'], ablend))
             builds[sig] = ablend
+
+        if cam_path:
+            # 相机路径是整片共享的；每个镜头复制一份工程，避免覆盖缓存
+            path_blend = os.path.join(d, 'camera_path.blend')
+            shutil.copyfile(ablend, path_blend)
+            path_json = os.path.join(d, 'camera_path.json')
+            with open(path_json, 'w', encoding='utf-8') as f:
+                json.dump(cam_path, f, ensure_ascii=False, indent=2)
+            script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  'apply_camera_path.py')
+            rc, out = pipeline.run([blender_exe, '-b', path_blend,
+                                    '--python', script, '--',
+                                    path_json, path_blend, str(total)],
+                                   log=os.path.join(d, '_camera_path.log'))
+            if rc != 0:
+                raise RuntimeError('镜头 %s 应用相机路径失败\n%s'
+                                   % (s['id'], out[-1800:]))
+            ablend = path_blend
+            progress('    %s 已套相机路径 %d 点' % (s['id'], len(cam_path.get('points') or [])))
 
         f0, f1 = s['range']
         progress('  %s 渲染 %d-%d …' % (s['id'], f0, f1))

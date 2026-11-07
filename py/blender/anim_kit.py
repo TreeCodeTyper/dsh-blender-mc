@@ -110,6 +110,20 @@ def color(c, default=(1.0, 1.0, 1.0)):
 # ═══════════════════════════════════════════════════════════════
 # 1. 场景上下文
 # ═══════════════════════════════════════════════════════════════
+def _action_fcurves(act):
+    """取 Action 的 fcurve。Blender 4.4+ 改成 layers/strips/channelbags，没有 act.fcurves。"""
+    try:
+        return list(act.fcurves)
+    except Exception:
+        pass
+    out = []
+    for layer in getattr(act, 'layers', []):
+        for strip in getattr(layer, 'strips', []):
+            for cb in getattr(strip, 'channelbags', []):
+                out.extend(cb.fcurves)
+    return out
+
+
 def scene_ctx(total, fps):
     """抓住骨架、基准位置与朝向。封面工程里只有一个 ARMATURE。"""
     sc = bpy.context.scene
@@ -337,13 +351,53 @@ def motion_ground(ctx, m):
     bob_c = max(1.0, float(bob.get('cycle', 16)))
     yaw0 = ctx['base_rz'] + math.radians(float(m.get('yaw', 0.0)))
 
+    # 提示词出片会保留真实地图；棚拍配方原本是固定 z 前进，
+    # 这里按帧把 root 贴到地图表面，否则角色会悬空滑行。
+    snap = os.environ.get('DSH_ANIM_TERRAIN_SNAP') == '1'
+    terrain = []
+    dg = None
+    if snap:
+        dg = bpy.context.evaluated_depsgraph_get()
+        for ob in bpy.data.objects:
+            if ob.type != 'MESH' or ob.hide_render:
+                continue
+            try:
+                if max(ob.dimensions) > 50.0:
+                    terrain.append(ob)
+            except Exception:
+                pass
+
+    def terrain_z(x, y):
+        """取 (x,y) 下方最高的地形面；找不到返回 None。"""
+        best = None
+        for ob in terrain:
+            try:
+                inv = ob.matrix_world.inverted()
+                origin = inv @ mu.Vector((x, y, 500.0))
+                hit, loc, _n, _i = ob.ray_cast(origin, (0.0, 0.0, -1.0),
+                                               distance=1000.0, depsgraph=dg)
+                if hit:
+                    z = (ob.matrix_world @ loc).z
+                    if best is None or z > best:
+                        best = z
+            except Exception:
+                pass
+        return best
+
     def dist(f):
         return speed * max(0.0, f - start)
 
     def char_world(f):
         d = dist(f)
         b = bob_a * math.sin(2.0 * math.pi * (f - start) / bob_c) if bob_a else 0.0
-        return base + FV * d + UP * b
+        p = base + FV * d + UP * b
+        if snap:
+            z = terrain_z(p.x, p.y)
+            # 只接受与角色原点同一高度层的地形；避免射线打到地底/远景大平面
+            # 把整条相机轨道拽到地下。
+            if z is not None and abs(z - base.z) < 8.0:
+                p.z = z + 0.02
+        return p
 
     return {'char_world': char_world, 'yaw': lambda f: yaw0,
             'tilt': lambda f: 0.0, 'bank': lambda f: 0.0,
@@ -829,7 +883,19 @@ def build_camera(ctx, cam, mo, override=None):
         CAM.constraints.remove(c)
     CAM.delta_location = (0.0, 0.0, 0.0)
     CAM.delta_rotation_euler = (0.0, 0.0, 0.0)
-    ov = override or {}
+    ov = dict(override or {})
+    # 通用相机覆盖：run/walk/dash 等配方没有 DSH_YJ_* 这条通道，
+    # 提示词里的低机位/推近/环绕要对它们也生效。
+    def _fenv(key):
+        try:
+            return float(os.environ.get(key) or 0.0)
+        except ValueError:
+            return 0.0
+    ov['az_add'] = float(ov.get('az_add', 0.0)) + _fenv('DSH_ANIM_CAM_AZ_ADD')
+    ov['z_add'] = float(ov.get('z_add', 0.0)) + _fenv('DSH_ANIM_CAM_Z_ADD')
+    ov['rise_add'] = float(ov.get('rise_add', 0.0)) + _fenv('DSH_ANIM_CAM_RISE_ADD')
+    ov['d_scale'] = float(ov.get('d_scale', 1.0)) * (1.0 + _fenv('DSH_ANIM_CAM_D_SCALE_ADD'))
+    ov['lens_scale'] = float(ov.get('lens_scale', 1.0)) * (1.0 + _fenv('DSH_ANIM_CAM_LENS_SCALE_ADD'))
     az = offset_track(cam['az'], ov.get('az_add', 0.0))
     dist = scale_track(cam['dist'], ov.get('d_scale', 1.0))
     lens = scale_track(cam['lens'], ov.get('lens_scale', 1.0))
@@ -846,7 +912,8 @@ def build_camera(ctx, cam, mo, override=None):
     sc.collection.objects.link(aim_empty)
 
     UP = mo['UP']
-    base_z = ctx['base'].z
+    # 贴地动作的 z 会随地形变化，相机的基准高度必须跟着角色，而不是封面原点。
+    base_z = mo['char_world'](1).z
     for f in range(1, ctx['total'] + 1, step):
         c = mo['char_world'](f)
         a = math.radians(track(az, f))
@@ -885,9 +952,18 @@ def follow_lights(ctx, spec, mo, cam_info):
     base = ctx['base']
     UP = mo['UP']
     aim_empty = cam_info['aim']
+    natural = os.environ.get('DSH_ANIM_NATURAL_LIGHT') == '1'
     fill_spec = spec.get('fill') or {}
     fill_ob = None
-    if fill_spec and float(fill_spec.get('energy', 0)) > 0:
+    if natural:
+        # 保留真实地图时，封面工程那套近距三点光会在雪地/草地上打出一块
+        # 摄影棚光斑，和 Minecraft 的天光叠在一起很假。只留太阳和天空，
+        # 让角色真的站在世界里，而不是站在灯箱里。
+        for ob in list(bpy.data.objects):
+            if ob.type == 'LIGHT' and ob.data.type in ('AREA', 'POINT', 'SPOT'):
+                ob.hide_render = True
+        p('    自然光模式：关闭近距人像灯，只保留太阳/天空')
+    elif fill_spec and float(fill_spec.get('energy', 0)) > 0:
         li = bpy.data.lights.new('FlightFill', type='AREA')
         li.energy = float(fill_spec.get('energy', 900.0))
         li.size = float(fill_spec.get('size', 6.0))
@@ -949,6 +1025,13 @@ def clean_stage(ctx, spec):
     """
     sc = ctx['sc']
     base = ctx['base']
+    # 提示词出片默认保留封面工程的 Minecraft 地形：
+    # run/walk/dash 等配方原本是“棚拍”，会隐藏 world 并铺棋盘地面。
+    if os.environ.get('DSH_ANIM_KEEP_WORLD') == '1':
+        spec = dict(spec)
+        spec['hide_world'] = False
+        spec['ground'] = None
+        spec['hide_held'] = False
     frags = [str(s).lower() for s in (spec.get('hide') or [])]
     hidden = 0
     for ob in list(bpy.data.objects):
@@ -1076,35 +1159,17 @@ def setup_render(ctx, r, out_dir):
         except Exception as e:
             p('    !! 天空亮度关键帧失败: %s' % e)
 
-    # EEVEE 没有 bloom，用合成器 Glare(Fog Glow) 做溢光
+    # EEVEE 没有 bloom，用合成器 Glare(Fog Glow) 做溢光。
+    # Blender 5.x 的合成器是 socket 化的（输出叫 GROUP_OUTPUT、Glare 的属性
+    # 也挪进了 socket），版本差异与“装不上就旁路”全在 glare_compat 里，
+    # 确保任何情况下都不会留下断链的合成树（那会输出整帧纯灰）。
     gl_spec = r.get('glare') or {}
     if gl_spec:
-        try:
-            nt = None
-            for attr in ('node_tree', 'compositing_node_group'):
-                cand = getattr(sc, attr, None)
-                if cand is not None and hasattr(cand, 'nodes'):
-                    nt = cand
-                    break
-            if nt is None:
-                raise RuntimeError('这个版本没有可用的合成器节点树')
-            for n in list(nt.nodes):
-                if n.type == 'GLARE':
-                    nt.nodes.remove(n)
-            rl = next(n for n in nt.nodes if n.type == 'R_LAYERS')
-            comp = next(n for n in nt.nodes if n.type == 'COMPOSITE')
-            gl = nt.nodes.new('CompositorNodeGlare')
-            gl.glare_type = gl_spec.get('type', 'FOG_GLOW')
-            gl.quality = 'HIGH'
-            gl.threshold = float(gl_spec.get('threshold', 1.0))
-            gl.size = int(gl_spec.get('size', 7))
-            gl.mix = float(gl_spec.get('mix', -0.35))
-            nt.links.new(rl.outputs['Image'], gl.inputs['Image'])
-            nt.links.new(gl.outputs['Image'], comp.inputs['Image'])
+        from glare_compat import install_glare
+        if install_glare(sc, gl_spec, log=p):
             p('    合成器 Glare: %s / threshold %.1f / size %d'
-              % (gl_spec.get('type', 'FOG_GLOW'), gl.threshold, gl.size))
-        except Exception as e:
-            p('    !! 辉光节点不可用: %s' % e)
+              % (gl_spec.get('type', 'FOG_GLOW'),
+                 float(gl_spec.get('threshold', 1.0)), int(gl_spec.get('size', 7))))
 
     if r.get('hide_fog'):
         hidden = 0
@@ -1176,6 +1241,15 @@ def apply_env(recipe):
             rr['samples'] = int(os.environ['DSH_YJ_SAMPLES'])
         except ValueError:
             pass
+    # 通用配方（run/walk/dash/ride/superman/conduct）的渲染覆盖；
+    # 让 mc_film 的 res/samples 对所有 preset 都生效，而不是只有 yujian。
+    if os.environ.get('DSH_ANIM_RES'):
+        rr['res'] = os.environ['DSH_ANIM_RES']
+    if os.environ.get('DSH_ANIM_SAMPLES'):
+        try:
+            rr['samples'] = int(os.environ['DSH_ANIM_SAMPLES'])
+        except ValueError:
+            pass
     if os.environ.get('DSH_YJ_FOG') == '1':
         rr['hide_fog'] = False
     return recipe
@@ -1194,7 +1268,20 @@ def load_recipe(src):
 def build(recipe, out_dir, total=None, fps=None):
     """按配方搭一整套动画，返回 ctx。"""
     recipe = apply_env(dict(recipe))
-    total = int(total if total is not None else recipe.get('duration', 240))
+    requested = int(total if total is not None else recipe.get('duration', 240))
+    recipe_total = int(recipe.get('duration') or 0)
+    cyc0 = recipe.get('cycle') or {}
+    cyclic = bool(cyc0 and (recipe.get('poses') or {}))
+    fit = 1.0
+    if cyclic:
+        # 循环动作只需要写半个循环：把 repeats 补到请求时长，别截断。
+        total = max(requested, int(cyc0.get('length') or 20))
+    elif recipe_total > 0 and requested != recipe_total:
+        # 非循环配方：先按原时长搭，最后整体重定时到请求时长。
+        # 直接按 requested 搭只会播开头（yujian 请求 2 秒 = 只看到起手）。
+        total = recipe_total
+        fit = (requested - 1) / float(max(1, total - 1))
+    build_total = total
     fps = int(fps or recipe.get('fps', 24))
     ctx = scene_ctx(total, fps)
     mo_spec = recipe.get('motion') or {'type': 'fly'}
@@ -1272,6 +1359,14 @@ def build(recipe, out_dir, total=None, fps=None):
     if cyc and poses:
         cyc_len = int(cyc.get('length', 32))
         cyc_rep = max(1, int(cyc.get('repeats', 1)))
+        # 请求时长 > 配方原时长时，循环自动补遍数（run 20 帧 × N 遍）。
+        need = max(1, int(math.ceil(total / float(max(1, cyc_len)))))
+        if need > cyc_rep:
+            cyc = dict(cyc)
+            cyc['repeats'] = need
+            cyc_rep = need
+            p('    循环补到 %d 帧（%d 遍）以填满 %d 帧'
+              % (cyc_len * cyc_rep, cyc_rep, total))
         poses = expand_cycle(poses, cyc)
         p('\n[2a] 循环：半循环 %d 帧 × %d 遍 = %d 帧、%d 根骨骼'
           % (cyc_len // 2, cyc_rep, cyc_len * cyc_rep, len(poses)))
@@ -1410,6 +1505,21 @@ def build(recipe, out_dir, total=None, fps=None):
             p('    相机能力：%s' % ', '.join(names))
         except Exception as _e:
             p('    !! 相机能力失败：%s' % _e)
+
+    # ⑧ 非循环配方重定时：动作 / 相机 / 灯光的时间轴一起缩放
+    if fit != 1.0 and build_total > 1:
+        for act in bpy.data.actions:
+            for fc in _action_fcurves(act):
+                for kp in fc.keyframe_points:
+                    kp.co.x = 1.0 + (kp.co.x - 1.0) * fit
+                    kp.handle_left.x = 1.0 + (kp.handle_left.x - 1.0) * fit
+                    kp.handle_right.x = 1.0 + (kp.handle_right.x - 1.0) * fit
+                fc.update()
+        ctx['total'] = requested
+        ctx['sc'].frame_end = requested
+        p('\n[8] 重定时：%d 帧 → %d 帧（%.2f 秒）'
+          % (build_total, requested, requested / float(fps)))
+        total = requested
 
     blend_name = recipe.get('blend_name') or '动画.blend'
     blend = os.path.join(out_dir, blend_name)

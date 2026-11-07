@@ -9,6 +9,7 @@
     python cli.py check  <图...>                          只审图
 """
 import argparse
+import json
 import os
 import sys
 
@@ -272,6 +273,59 @@ def cmd_scan(a):
     return 0
 
 
+def cmd_camera_path(a):
+    from anvil import World
+    from scan import surface_map
+    from camera_path import plan_camera_path
+    if not _need_save(a.save):
+        return 1
+    x0, x1, z0, z1 = a.area
+    st = a.start
+    gl = a.goal
+    w = World(a.save)
+    print(f'相机路径: ({st[0]},{st[1]}) -> ({gl[0]},{gl[1]})')
+    top = surface_map(w, x0, x1, z0, z1, y0=a.y[0], y1=a.y[1])
+    pts = plan_camera_path(top, st, gl, bounds=(x0, x1, z0, z1),
+                           samples_per_seg=a.samples, height_offset=a.height)
+    data = {'start': list(st), 'goal': list(gl), 'points': pts}
+    print(f'路径点: {len(pts)}')
+    if a.out:
+        os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+        with open(a.out, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f'已写 {a.out}')
+    else:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+    return 0 if pts else 1
+
+
+def cmd_shoot_search(a):
+    from shoot_search import search
+    if not _need_save(a.save):
+        return 1
+    env = {}
+    if a.pose:
+        env['DSH_POSE'] = a.pose
+    if a.hour:
+        env['DSH_HOUR'] = str(a.hour)
+    if a.face:
+        env['DSH_FACE'] = str(a.face)
+    if a.trees is not None:
+        env['DSH_TREES'] = str(a.trees)
+    if a.item_right:
+        env['DSH_ITEM_R'] = a.item_right
+    if a.armor:
+        env['DSH_ARMOR'] = a.armor
+    r = search(a.save, a.area, a.out, center=a.center, top=a.top,
+               scan_radius=a.radius, skin=a.skin, env=env,
+               n_init=a.n_init, iters=a.iters, seed=a.seed,
+               progress=print)
+    print('\n最佳参数:', r['best'])
+    print('搜索分数:', r['score'])
+    print('成图:', r['png'])
+    return 0
+
+
 def cmd_shoot(a):
     from pipeline import shoot
     if not _need_save(a.save):
@@ -327,10 +381,15 @@ def cmd_shoot(a):
                           ('tree_h', 'tree_h'),
                           ('hour', 'hour'),
                           ('fog', 'fog'),
-                          ('clouds', 'clouds')):
+                          ('clouds', 'clouds'),
+                          ('face', 'face'),
+                          ('pose', 'pose'),
+                          ('skin3d_thick', 'skin3d_thick')):
         v = getattr(a, arg_name, None)
         if v is not None:
             params[key] = v
+    if getattr(a, 'skin3d', False):
+        params['skin3d'] = True
     if params.get('items') is not None and (
             params.get('item_r') is not None or params.get('item_l') is not None):
         # 契约：--items 给了就覆盖 --item-right/--item-left
@@ -352,6 +411,166 @@ def cmd_shoot(a):
     return 0
 
 
+def _ai_skin_path(value):
+    """steve / alex / 用户自己的 64x64 皮肤路径。"""
+    key = (value or 'steve').strip()
+    low = key.lower()
+    if low in ('', 'steve', 'default', '史蒂夫'):
+        return os.path.join(HERE, '..', 'assets', 'skins', 'steve.png')
+    if low in ('alex', 'slim', '艾利克斯'):
+        return os.path.join(HERE, '..', 'assets', 'skins', 'alex.png')
+    return os.path.abspath(os.path.expanduser(key))
+
+
+def _ai_rig_path(skin_key='steve', out_dir=None):
+    """AI 人偶 rig 的缓存路径；优先放在输出目录，DSH_AI_RIG 可覆盖。"""
+    env = os.environ.get('DSH_AI_RIG')
+    if env:
+        return os.path.abspath(env)
+    data = os.environ.get('DSH_MC_DATA') or os.path.join(
+        os.path.expanduser('~'), '.dsh', 'blender-mc')
+    key = (skin_key or 'steve').strip().lower()
+    if key in ('alex', 'slim', '艾利克斯'):
+        key = 'alex'
+    elif key in ('', 'steve', 'default', '史蒂夫'):
+        key = 'steve'
+    else:
+        key = 'custom'
+    if out_dir:
+        return os.path.join(os.path.abspath(out_dir),
+                            f'AI_Character_Rig_v0.3_{key}.blend')
+    return os.path.join(data, 'ai_rig', f'AI_Character_Rig_v0.3_{key}.blend')
+
+
+def cmd_ai_char(a):
+    """提示词 → CharacterSpec → 原创 AI 人偶渲染（M1，实验性）。"""
+    import json
+    import subprocess
+    from char_control import compile_prompt, validate_spec, summarize, normalize_camera
+    from pipeline import find_blender
+
+    out = os.path.abspath(a.out)
+    os.makedirs(out, exist_ok=True)
+    prompt = a.prompt
+    if a.action and a.action.lower() not in prompt.lower():
+        prompt = prompt + ' ' + a.action
+    spec = compile_prompt(prompt)
+    if a.format:
+        spec['camera']['framing'] = a.format
+    normalize_camera(spec)
+    errors = validate_spec(spec)
+    if errors:
+        print('❌ spec 不合法:')
+        for e in errors:
+            print('  - ' + e)
+        return 1
+    spec_path = os.path.join(out, 'spec.json')
+    with open(spec_path, 'w', encoding='utf-8', newline='\n') as f:
+        json.dump(spec, f, ensure_ascii=False, indent=2)
+    print(summarize(spec))
+    print('spec:', spec_path)
+    if a.spec_only:
+        return 0
+
+    blender = find_blender(a.blender)
+    skin_key = getattr(a, 'skin', None) or 'steve'
+    skin_path = _ai_skin_path(skin_key)
+    if not os.path.exists(skin_path):
+        print('❌ 找不到皮肤文件:', skin_path)
+        return 1
+    rig = os.path.abspath(a.rig) if a.rig else _ai_rig_path(skin_key, out)
+    if getattr(a, 'skin3d', False):
+        os.environ['DSH_AI_SKIN3D'] = '1'
+        if not a.rig:
+            rig = rig[:-6] + '_3d.blend' if rig.endswith('.blend') else rig + '_3d.blend'
+    script = os.path.join(HERE, 'blender', 'ai_rig.py')
+    if a.rebuild or not os.path.exists(rig):
+        os.makedirs(os.path.dirname(rig), exist_ok=True)
+        print('[1/2] 构建原创 AI 人偶 rig…')
+        cmd = [blender, '-b', '--factory-startup', '--python', script,
+               '--', '--build', rig, '--res', a.res, '--skin', skin_path]
+        if getattr(a, 'skin3d', False):
+            cmd.append('--skin3d')
+        log_path = os.path.join(out, 'build.log')
+        with open(log_path, 'w', encoding='utf-8') as log:
+            p = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT)
+        if p.returncode != 0 or not os.path.exists(rig):
+            print('❌ 构建失败，日志:', log_path)
+            print(open(log_path, encoding='utf-8', errors='replace').read()[-2000:])
+            return 1
+    else:
+        print('[1/2] 复用 rig:', rig)
+
+    png = os.path.join(out, '人偶.png')
+    print('[2/2] 按 spec 渲染…')
+    cmd = [blender, '-b', '--factory-startup', '--python', script,
+           '--', '--rig', rig, '--spec', spec_path,
+           '--out', png, '--samples', str(a.samples)]
+    log_path = os.path.join(out, 'render.log')
+    with open(log_path, 'w', encoding='utf-8') as log:
+        p = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT)
+    if p.returncode != 0 or not os.path.exists(png):
+        print('❌ 渲染失败，日志:', log_path)
+        print(open(log_path, encoding='utf-8', errors='replace').read()[-2000:])
+        return 1
+
+    result = {'prompt': a.prompt, 'spec': spec_path, 'rig': rig,
+              'skin': skin_path, 'png': png, 'action': spec.get('action'),
+              'camera': spec.get('camera', {}).get('framing')}
+    if a.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print('\\n' + '=' * 66)
+        print('人偶:', png)
+        print('spec:', spec_path)
+        print('rig: ', rig)
+        print('皮肤:', result['skin'])
+        print('动作:', result['action'], ' 画幅:', result['camera'])
+    return 0
+
+
+def cmd_map_import(a):
+    """加载存档 → 可编辑的 Blender 背景地图（原创实现）。"""
+    import json
+    from pipeline import import_map, find_blender
+    save = getattr(a, 'save', None)
+    if getattr(a, 'map', None):
+        import maplib
+        try:
+            save, _meta = maplib.resolve_world(a.map)
+        except Exception as e:
+            print(f'❌ 地图库解析失败: {e}')
+            return 1
+    if not save or not _need_save(save):
+        return 1
+    y0, y1 = a.y
+    try:
+        r = import_map(save, a.area, a.out, center=a.center, radius=a.radius,
+                       ymin=y0, ymax=y1, name=a.name, res=a.res,
+                       samples=a.samples, preview=not a.no_preview,
+                       blender=a.blender, force=a.force, progress=print)
+    except Exception as e:
+        print(f'❌ 背景地图生成失败: {type(e).__name__}: {e}')
+        return 1
+    if a.json:
+        print(json.dumps(r, ensure_ascii=False, indent=2))
+    else:
+        print('\n' + '=' * 66)
+        print(f"背景地图: {r['blend']}")
+        if r.get('preview'):
+            print(f"预览:     {r['preview']}")
+        print(f"范围:     {r['area']}  中心 {r['center']}  半径 {r['radius']}")
+        print(f"Y:        {r['ymin']}..{r['ymax']}")
+        print('集合:     MAP / LIGHTS / CAMERA')
+    if a.open:
+        try:
+            import subprocess
+            subprocess.Popen([find_blender(a.blender), r['blend']])
+        except Exception as e:
+            print(f'（自动打开失败，手动打开上面的 .blend 即可: {e}）')
+    return 0
+
+
 def cmd_anim(a):
     from pipeline import animate, find_blender
     if not os.path.isfile(a.blend):
@@ -359,8 +578,27 @@ def cmd_anim(a):
         print('   先把封面渲出来（shoot），工程就在输出目录里: <out>/尝试1/封面_世界.blend')
         return 1
     b = find_blender(a.blender)
-    r = animate(b, a.blend, a.out, total=a.frames, fps=a.fps,
-                kind=getattr(a, 'preset', 'killaura'),
+    preset = getattr(a, 'preset', 'killaura')
+    frames, fps = a.frames, a.fps
+    if getattr(a, 'prompt', None):
+        from prompt_film import compile_anim
+        spec = compile_anim(a.prompt, fps=fps)
+        preset, frames, fps = spec['preset'], spec['total'], spec['fps']
+        os.environ['DSH_ANIM_RES'] = spec['res']
+        os.environ['DSH_ANIM_SAMPLES'] = str(spec['samples'])
+        os.environ.update(spec.get('env') or {})
+        _res_key = {'yujian': ('DSH_YJ_RES', 'DSH_YJ_SAMPLES'),
+                    'aura': ('DSH_AURA_RES', 'DSH_AURA_SAMPLES'),
+                    'killaura': ('DSH_KA_RES', 'DSH_KA_SAMPLES')}.get(preset)
+        if _res_key:
+            os.environ[_res_key[0]] = spec['res']
+            os.environ[_res_key[1]] = str(spec['samples'])
+        print('提示词 → 预设 %s / %d 帧 / %d fps / %s'
+              % (preset, frames, fps, spec['res']))
+        for w in spec.get('warnings') or []:
+            print('⚠️  ' + w)
+    r = animate(b, a.blend, a.out, total=frames, fps=fps,
+                kind=preset,
                 preview=a.preview, progress=print)
     print(f"\n动画工程: {r['blend']}")
     if r.get('frames'):
@@ -377,12 +615,22 @@ def cmd_film(a):
     from pipeline import find_blender
     import film as film_mod
 
-    if a.plan:
+    if getattr(a, 'prompt', None):
+        if not a.blend:
+            print('❌ 用 --prompt 时要同时给 --blend <封面工程.blend>')
+            return 1
+        from prompt_film import compile_prompt
+        plan = compile_prompt(a.prompt, blend=a.blend)
+        print('提示词 → preset=%s，%d 帧 / %.1f 秒 / %s'
+              % (plan['preset'], plan['total'], plan['total'] / plan['fps'], plan['res']))
+        for w in plan.get('warnings') or []:
+            print('⚠️  ' + w)
+    elif a.plan:
         plan = film_mod.load_plan(a.plan)
     elif a.plan_json:
         plan = film_mod.load_plan(a.plan_json)
     else:
-        print('❌ 要给 --plan <分镜表.json> 或 --plan-json \'{"shots":[...]}\'')
+        print('❌ 要给 --prompt + --blend，或 --plan / --plan-json')
         return 1
     if a.blend:
         plan['blend'] = a.blend
@@ -422,6 +670,9 @@ def cmd_mobs(a):
         return mobs.main([a.action] + ([a.query] if a.query else []))
     if a.action == 'spawn':
         exe = a.blender or _default_blender()
+        if not exe or not os.path.exists(exe):
+            print('❌ 找不到 Blender：请用 --blender 指定路径，或把 blender 加进 PATH')
+            return 2
         ok, log = mobs.spawn(a.query, a.blend, a.out, exe,
                              pos=[float(v) for v in a.pos.split(',')],
                              scale=float(a.scale))
@@ -437,11 +688,17 @@ def cmd_mobs(a):
 
 
 def _default_blender():
+    """requirements 里的查找函数叫 _find_blender（没有公开别名）。
+
+    以前这里写的是 requirements.find_blender()，AttributeError 被 except 吞成
+    'blender'，而 'blender' 通常不在 PATH → spawn 时报 WinError 2。返回 None
+    让调用方给出人能看懂的提示。
+    """
     import requirements
     try:
-        return requirements.find_blender()
+        return requirements._find_blender()
     except Exception:
-        return 'blender'
+        return None
 
 
 def cmd_map(a):
@@ -518,6 +775,36 @@ def main():
     s.add_argument('--json', default=None)
     s.set_defaults(func=cmd_scan)
 
+    cp = sub.add_parser('camera-path', help='A*/Theta*/Catmull-Rom 相机路径')
+    cp.add_argument('save')
+    cp.add_argument('--area', type=_area, required=True)
+    cp.add_argument('--start', type=_pair_int, required=True, help='x,z')
+    cp.add_argument('--goal', type=_pair_int, required=True, help='x,z')
+    cp.add_argument('--y', type=_pair_int, default=(50, 200))
+    cp.add_argument('--height', type=float, default=2.5)
+    cp.add_argument('--samples', type=int, default=8)
+    cp.add_argument('--out', default=None)
+    cp.set_defaults(func=cmd_camera_path)
+
+    ss = sub.add_parser('shoot-search', help='渲染反馈搜索机位（贝叶斯）')
+    ss.add_argument('save')
+    ss.add_argument('--area', type=_area, required=True)
+    ss.add_argument('--out', required=True)
+    ss.add_argument('--center', type=_pair_int, default=None)
+    ss.add_argument('--top', type=int, default=3, help='没给 center 时，取扫描前 N 个机位做基准')
+    ss.add_argument('--radius', type=int, default=15, help='扫描平坦半径')
+    ss.add_argument('--skin', default=None)
+    ss.add_argument('--pose', default=None)
+    ss.add_argument('--hour', default=None)
+    ss.add_argument('--face', default=None)
+    ss.add_argument('--trees', type=int, default=None)
+    ss.add_argument('--item-right', default=None)
+    ss.add_argument('--armor', default=None)
+    ss.add_argument('--n-init', type=int, default=6)
+    ss.add_argument('--iters', type=int, default=4)
+    ss.add_argument('--seed', type=int, default=11)
+    ss.set_defaults(func=cmd_shoot_search)
+
     h = sub.add_parser('shoot', help='出封面')
     h.add_argument('save')
     h.add_argument('--area', type=_area, required=True)
@@ -563,6 +850,16 @@ def main():
                    help='雾浓度倍率（0=关雾；不给=保持旧行为）')
     h.add_argument('--clouds', type=_switch, default=None,
                    help='云 1/0（0=隐藏云层/雾体积/方块云）')
+    h.add_argument('--face', default=None,
+                   help='面部表情：auto（默认，仅 snapshot 姿势笑）| happy | angry | sad | '
+                        'surprised | curious | neutral | blink（眨眼）| 0（关）')
+    h.add_argument('--pose', default=None,
+                   help='姿势：action（默认）| hero | raise | guard | snapshot（照相取景框）| '
+                        'run | jump | point | wave | sit | legacy')
+    h.add_argument('--skin3d', action='store_true', default=False,
+                   help='3D 皮肤外层：把头发/帽子/衣服的不透明像素挤出厚度')
+    h.add_argument('--skin3d-thick', dest='skin3d_thick', type=float, default=None,
+                   metavar='T', help='3D 皮肤厚度（格），默认 0.02')
     h.set_defaults(func=cmd_shoot)
 
     n = sub.add_parser('anim', help='出动画（10 秒杀戮光环）')
@@ -575,11 +872,15 @@ def main():
                    help='预设名：killaura=进圈就死（默认）；aura=挥砍+装饰光环；'
                         'yujian=御剑飞天；也可以是自己放进 '
                         'py/blender/presets/ 的任意 <名字>.json（写配方即出新动画，不用改代码）')
+    n.add_argument('--prompt', default=None,
+                   help='自然语言提示词；给了就按提示词选预设，覆盖 --preset')
     n.set_defaults(func=cmd_anim)
 
     f = sub.add_parser('film', help='分镜表 → 多镜头 → 剪成一支成片（含分镜表.md）')
     f.add_argument('--plan', default=None, help='分镜表 .json 路径')
     f.add_argument('--plan-json', default=None, help='直接给分镜表 JSON 字符串')
+    f.add_argument('--prompt', default=None,
+                   help='自然语言提示词；给了就自动编译成多镜头分镜（需配 --blend）')
     f.add_argument('--blend', default=None, help='覆盖分镜表里的封面工程路径')
     f.add_argument('--out', required=True)
     f.add_argument('--animatic', action='store_true',
@@ -595,6 +896,44 @@ def main():
     mp.add_argument('rest', nargs=argparse.REMAINDER,
                     help='import|list|get|resolve|rename|delete|default|doctor + 各自参数')
     mp.set_defaults(func=cmd_map)
+
+    mi = sub.add_parser('map-import',
+                        help='加载存档 → 可编辑的 Blender 背景地图（MAP/LIGHTS/CAMERA）')
+    g = mi.add_mutually_exclusive_group(required=True)
+    g.add_argument('--save', help='存档目录（含 region/）')
+    g.add_argument('--map', help='背景地图库里的名字或 id')
+    mi.add_argument('--area', type=_area, default=None, help='x0,x1,z0,z1（不给就按 region 自动算）')
+    mi.add_argument('--center', type=_pair_int, default=None, help='x,z（默认区域中心）')
+    mi.add_argument('--radius', type=_posint, default=96, help='导出半径（默认 96）')
+    mi.add_argument('--y', type=_pair_int, default=(0, 320), help='Y 范围 y0,y1（默认 0,320）')
+    mi.add_argument('--out', required=True, help='输出目录')
+    mi.add_argument('--name', default='背景_世界', help='.blend 名（默认 背景_世界）')
+    mi.add_argument('--res', type=_res, default='1280x720', help='预览尺寸')
+    mi.add_argument('--samples', type=_posint, default=64, help='预览采样（默认 64）')
+    mi.add_argument('--no-preview', action='store_true', help='不渲染预览图')
+    mi.add_argument('--open', action='store_true', help='完成后用 Blender 打开 .blend')
+    mi.add_argument('--force', action='store_true', help='忽略导出缓存')
+    mi.add_argument('--json', action='store_true', help='输出完整 json')
+    mi.set_defaults(func=cmd_map_import)
+
+    ac = sub.add_parser('ai-char',
+                        help='提示词 → AI 人偶 CharacterSpec → 原创 rig 渲染（实验性 M1）')
+    ac.add_argument('--prompt', required=True, help='自然语言提示词（中文/英文）')
+    ac.add_argument('--out', required=True, help='输出目录（spec.json + 人偶.png）')
+    ac.add_argument('--format', default=None,
+                    help='覆盖画幅：9:16 / 16:9 / 1:1 / 4:5')
+    ac.add_argument('--action', default=None,
+                    help='覆盖动作：sit/run/jump/wave/point/stand')
+    ac.add_argument('--rig', default=None, help='现有 AI rig .blend（默认数据目录缓存）')
+    ac.add_argument('--skin', default='steve', help='steve / alex / 64x64 皮肤 PNG 路径')
+    ac.add_argument('--skin3d', action='store_true',
+                    help='叠加 3D 皮肤外层（帽子/头发、外套、裤腿 overlay）')
+    ac.add_argument('--rebuild', action='store_true', help='强制重建 rig')
+    ac.add_argument('--res', default='720x1280', help='构建 rig 时的参考画幅')
+    ac.add_argument('--samples', type=_posint, default=16, help='渲染采样（默认 16）')
+    ac.add_argument('--spec-only', action='store_true', help='只编译 spec，不渲染')
+    ac.add_argument('--json', action='store_true', help='输出完整 json')
+    ac.set_defaults(func=cmd_ai_char)
 
     mo = sub.add_parser('mobs', help='MCprep 生物 rig 库：列出来 / 搜 / 生成进工程')
     mo.add_argument('action', choices=['list', 'find', 'spawn'])

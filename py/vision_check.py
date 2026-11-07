@@ -170,7 +170,7 @@ def find_subject(img):
     return (int(x), int(y), int(x + w), int(y + h)), m, area
 
 
-def check_facing(img, box):
+def check_facing(img, box, head_box=None):
     """朝向：头部区域的【皮肤色 vs 头发色】占比。
 
     ⚠️ 坑 64：第一版取主体高度的【上 35%】当"头部"，把肩膀和手臂也框进来了
@@ -182,10 +182,15 @@ def check_facing(img, box):
       正面 / 3/4 → 头部有脸（皮肤多、头发相对少）
       背面       → 头部全是头发（皮肤几乎没有、头发多）
     """
-    x0, y0, x1, y1 = box
-    h = y1 - y0
-    hy1 = y0 + max(4, int(h * 0.22))          # ★ 只取顶部 22% = 头部
-    head = img[max(0, y0):hy1, max(0, x0):x1]
+    if head_box is not None:
+        # ★ 精确头部框：举剑/抬臂时主体框顶部是手臂/剑，不能再拿顶部 22% 当脸。
+        hx0, hy0, hx1, hy1 = head_box
+        head = img[max(0, hy0):hy1, max(0, hx0):hx1]
+    else:
+        x0, y0, x1, y1 = box
+        h = y1 - y0
+        hy1 = y0 + max(4, int(h * 0.22))      # 兜底：旧主体框顶部 22%
+        head = img[max(0, y0):hy1, max(0, x0):x1]
     if head.size == 0:
         return {'facing': 'unknown', 'skin_ratio': 0.0}
     n = max(1, head.shape[0] * head.shape[1])
@@ -531,7 +536,7 @@ def _subject_pixels(img, box):
     return {'color_ratio': round(color_ratio, 4), 'fg_ratio': round(fg_ratio, 4)}
 
 
-def check_image(path, subject_box=None, verbose=False):
+def check_image(path, subject_box=None, head_box=None, verbose=False):
     """主入口：返回 {verdict, score, issues, details}"""
     try:
         img = imread_u(path)
@@ -554,6 +559,8 @@ def check_image(path, subject_box=None, verbose=False):
                 if jj.get('subject_box') and jj.get('size') == [W, H]:
                     subject_box = tuple(int(v) for v in jj['subject_box'])
                     box_src = 'blender_json'
+                if jj.get('head_box') and jj.get('size') == [W, H]:
+                    head_box = tuple(int(v) for v in jj['head_box'])
         except Exception:
             pass
     if subject_box is None:
@@ -576,7 +583,11 @@ def check_image(path, subject_box=None, verbose=False):
         else:
             subject_box = (x0, y0, x1, y1)
 
-    det = {'size': [W, H], 'subject_box': subject_box,
+    if head_box is not None:
+        hx0, hy0, hx1, hy1 = _clamp_box(head_box, W, H)
+        head_box = (hx0, hy0, hx1, hy1) if (hx1 - hx0) >= 8 and (hy1 - hy0) >= 8 else None
+
+    det = {'size': [W, H], 'subject_box': subject_box, 'head_box': head_box,
            'subject_box_given': box_given, 'subject_box_from': box_src}
     issues = []
     score = 100.0
@@ -611,7 +622,7 @@ def check_image(path, subject_box=None, verbose=False):
                           f"前景对比 {sp['fg_ratio']*100:.1f}%）—— 雾/色偏可能把配色带跑了")
             score -= 6
 
-        det['facing'] = check_facing(img, subject_box)
+        det['facing'] = check_facing(img, subject_box, head_box=head_box)
         f = det['facing']['facing']
         if f == 'back':
             issues.append(f"看到的是【背面】（头部皮肤占比仅 "

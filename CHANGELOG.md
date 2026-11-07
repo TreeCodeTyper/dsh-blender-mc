@@ -6,6 +6,237 @@
 
 ---
 
+## [0.6.0] - 2026-11-07
+
+**地图查找从暴力扫描换成 2.5D 地形算法，接口不变；补提示词动画、AI 人偶 3D 皮肤与本地存档读取。**
+
+### 新增 / 替换
+
+- `py/scan.py`：
+  - **积分图（Summed-Area Table）** 一次算完整张图的窗口有效格数/高度方差/可站格数，
+    `find_open_ground` 从 O(F·r²) 降为 O(N)。
+  - **Amanatides-Woo DDA 体素射线** 替换 `openness` 的固定锥稀疏采样；按格比例统计，
+    单棵树不会一票否决整条视线。
+  - 同一组射线统计 `relief`；范围外/缺列仍按“没数据=被挡”处理。
+  - **Poisson-disk 最小间距** 替换 `x//2r` 硬网格去重，候选更分散；
+    `best_shots` 末尾再用 **NMS** 抑制同片广场。
+  - **Pareto → NSGA-II**：快速非支配排序 + 拥挤距离，避免只追求“最空”的机位。
+  - **距离变换（Felzenszwalb）**：`_distance_transform` 算每格到最近不可站格的
+    欧氏距离，候选带 `inscribed` 内接半径。
+  - **RANSAC + Sobel 坡度**：`_ransac_slope` 在窗口内拟合平面，和单点 Sobel
+    取最大值；超过 `max_slope` 的候选直接淘汰。
+  - **地平线角**：`openness` 保留通视比例，额外用 9 条 DDA 射线算 `horizon`
+    （1=无遮挡，0=仰角≥45°），写进候选。
+  - **相机侧过滤** `_camera_side_ok`：用 `TopMap.any/wet` 区分树冠与水面，
+    拒绝“主体看起来开阔、相机却埋进树里”的机位。
+- 新增 `py/camera_path.py`：`astar` + `theta_smooth` + `catmull_rom` +
+  `plan_camera_path`，CLI 可输出 JSON 路径点；新增 `mc_camera_path` 工具（第 12 个），
+  支持 save/map、area/start/goal、height/samples/out。
+- 新增 `py/search.py`：无第三方依赖的 `cmaes` 与 `bayes_opt`（GP + EI），
+  供“低清渲染→评分”的反馈搜索调用。
+- 保持 `surface_map / find_open_ground / openness / relief / best_shots /
+  rough_shots / pick_from_save` 与 `mc_scan` 返回字段兼容；`best_shots` 额外带
+  `pareto / crowding / inscribed / slope / horizon` 字段。
+
+### 性能
+
+- 同一张 200×200 区域、14123 个地表列：扫描仍约 6s，主要受 `surface_map`
+  读方块限制；平地搜索部分已与面积近似线性。
+- 31×31 全平地、`radius=5`：理论 441 个候选，实得 441 个。
+- 坡度/地平线会淘汰一部分原先的“开阔但贴坡/贴树”机位；同一张图上主推会变化，
+  不再保证固定返回 `(43,83)`。
+
+### 新增（2026-11-06）
+
+- `py/prompt_film.py` + `mc_anim --prompt` / `mc_film --prompt`：关键词 → preset
+  （killaura/conduct/dash/ride/superman/run/walk/yujian）；解析秒数、9:16、相机词；
+  1 镜或 3 镜；通用相机 env `DSH_ANIM_CAM_*`。
+- `DSH_ANIM_KEEP_WORLD=1` 保留真实地图；`DSH_ANIM_TERRAIN_SNAP=1` 按帧 raycast 贴地
+  （带 ±8 格高度保护，避免把相机拖到地底）。
+- `py/blender/ai_rig.py` AI 人偶 3D 皮肤：`head_outer/chest_outer/waist_outer`，
+  读取 64×64 皮肤的帽子/外套/裤腰 overlay，alpha 透明；`mc_ai_char.skin3d` / `--skin3d`。
+- 地图库支持本地存档直读：`import_local` / `import_local_many` / `map local --all`；
+  `POST /maps/local`、`POST /maps/pick-local`；上传上限收紧为单 zip 1GB。
+- 数据目录仍默认 `<DSH_HOME>/blender-mc`（如 `C:\Users\<用户>\.dsh\blender-mc`），未迁到
+  工作区；可用 `mapsDir` / `skinsDir` 覆盖，工作区副本只是本机实验，不随包分发。
+
+### 修复（2026-11-07）
+
+- **Blender 5.x Glare 全灰**：5.2 的 `CompositorNodeGlare` 没有旧的
+  `glare_type/threshold/size/mix` 属性，输出节点也从 `COMPOSITE` 变成 `GROUP_OUTPUT`；
+  旧的删节点重连逻辑抛 `StopIteration` 被吞掉，合成器输出纯灰。新增
+  `py/blender/glare_compat.py` 按 socket 重建 Glare，并兼容两种输出节点；
+  `anim_kit` / `animate_aura` 改用该模块。
+- **`mc_mobs` 默认找不到 Blender**：`cli.py` 调了不存在的 `requirements.find_blender()`，
+  `AttributeError` 被吞成 `'blender'`，不在 PATH 时 `WinError 2`；改调
+  `_find_blender()`，失败给明确提示。
+- **动画时长被配方写死**：`pipeline.animate()` 不再给配方传空 total/fps；循环动作按请求
+  时长补 `repeats`，非循环动作整条时间轴重定时（`[8] 重定时`），10 秒跑步不再只有 80 帧。
+- **提示词短片只出 1 镜**：单镜阈值 120→72 帧；三镜按 40/35/25% 切，建立镜头拉远抬高、
+  收尾推近，三镜带方位角差；非 yujian 配方不再误用 `DSH_YJ_*`。
+- **相机路径把主体甩出画面**：`apply_camera_path.py` 无 `look_at` 时逐帧对准骨架 Head，
+  不再沿路径切线看。
+- **保留真实地图时的摄影棚光斑**：新增 `DSH_ANIM_NATURAL_LIGHT=1`，关掉近距
+  AREA/POINT/SPOT，只留太阳/天空；`compile_prompt` 在 `KEEP_WORLD` 时自动开启。
+
+### 已知问题（2026-11-07）
+
+- `mc_shoot` 自动选点仍只按开阔度，容易选到「空但没内容」的雪原/平地；缺 scenic 评分。
+- 皮肤脸嘴部缺失：`mesh face` 有 `Skin`+`Mouth` 槽，隐藏 lip/mouth/teeth 后仍无嘴；
+  隐藏 `mesh face` 会变洞；正确修法是重做 UV/材质分层。
+- 提示词跑步脚底仍略悬空（`motion_ground` root 单点）；3D 皮肤只做头/胸/腰。
+- 近景盔甲仍是「钻石层 + RGB tint」的灰盒子；树在 8–45 格内仍是巨块，缺树种/尺寸随机。
+- 动画三镜只有距离/方位角变化，没有推拉、环绕、手持等运镜曲线。
+
+---
+
+## [0.5.9] - 2026-11-04
+
+**坐姿、空手修正，以及提示词 → 可检查的 AI 人偶控制 spec → 原创 rig 渲染（M1，实验性）。**
+
+### 新增
+
+- `mc_ai_char` / `python py/cli.py ai-char`：把自然语言提示词编译成
+  `CharacterSpec`（动作、骨盆高度、脚 IK、手 IK、脊柱、头、表情、相机），
+  校验后用原创 AI 人偶渲染；输出 `spec.json` 与 `人偶.png`。
+- `py/char_control.py`：确定性提示词编译器 + spec 校验；CLI 支持
+  `--prompt/--spec/--out/--validate/--json`。
+- `py/blender/ai_rig.py`：程序化方块人、原创骨架、解析两骨 IK、相机/灯光；
+  64×64 Steve/Alex 皮肤 UV 贴到全身，脸直接来自皮肤；不依赖 BPS/BSS，不复制其资产。
+- `docs/AI人偶控制规范.md`：字段表、坐标约定、示例与后端适配说明。
+- 动作：`sit/run/jump/wave/point/stand`；画幅：`9:16/16:9/1:1/4:5`。
+
+### 新增（坐姿）
+
+- `--pose sit` / `mc_shoot.pose = "sit"`：坐地姿势。大腿抬平、一膝弯一膝伸，
+  躯干侧倾、头微偏；摆完姿势后按求值包围盒二次落地，避免人物悬空。
+
+### 修复
+
+- `--item-right` / `--item-left` 以前会被 pipeline 静默丢弃（只处理了 `items`），
+  现在单边参数会正确写入 `DSH_ITEM_R` / `DSH_ITEM_L`；`--item-right none`
+  可以明确空手，不再回落到默认钻石剑。
+- `jump` 以前只是蹲下、脚仍在地面；现在骨盆抬起、双脚目标离地。
+- 16:9 横屏会自动退远/抬高目标，且把这些值写回 `spec.json`，不再出现
+  “spec 写 8、实际用 11”的契约漂移。
+- 修复大腿底面误采样鞋底灰块的问题；去掉重复的 knee/elbow 关节块，
+  关节填充块正确绑定到骨骼。
+
+### 说明
+
+- M1 已有 64×64 Steve/Alex 皮肤，但没有面部表情骨；写实人脸/服装不在本版范围。
+- 参考 BPS/BSS/Simple/Mob/MiBlend/MCBlend 的公开思路，骨骼、网格、权重与
+  控制代码均为原创；详见 `THIRD_PARTY_NOTICES.md`。
+
+---
+
+## [0.5.8] - 2026-11-04
+
+**BPS 角色更立体、动作更多。**
+
+### 新增
+
+- `--skin3d` / `mc_shoot.skin3d`：3D 皮肤外层。头部（头发/帽子）按皮肤
+  outer layer 的不透明像素挤出厚度；身体/手臂/腿的外层加 Solidify 衣料厚度。
+  `--skin3d-thick`（0.005–0.06，默认 0.02）调厚度。默认关，脸仍保留皮肤贴图。
+- `--pose` 新增 `run`（跑动）、`jump`（跳跃）、`point`（指向）、
+  `wave`（挥手）四个 FK 姿势；`mc_shoot` 的 `pose` 枚举同步。
+- `py/blender/skin3d.py`：原创 3D 皮肤模块，只使用 BPS 自带外层网格与皮肤贴图。
+
+### 修复
+
+- `run`/`jump` 时临时静音腿部 IK 约束，改用纯 FK，腿能真正抬起来；
+  其余姿势仍保留原 IK 站姿。
+- `wave`/`point` 改用左手（右手默认拿剑），避免手臂横穿脸。
+
+### 说明
+
+- 头部逐像素挤出，身体只加 Solidify：身体外层逐像素会出现透明像素破洞，
+  视觉上像碎布，所以不做逐像素。
+- 3D 皮肤不改变 BPS 的方块比例；要更高精度模型需要另换 rig。
+
+---
+
+## [0.5.7] - 2026-11-03
+
+**新增「背景地图」全链路：存档直接装成可编辑的 Blender 工程。**
+
+### 新增
+
+- `mc_map_import` 工具 + `python py/cli.py map-import`：存档 / 地图库 → 导出地形 →
+  Blender 导入 → 整理成 `MAP` / `LIGHTS` / `CAMERA` 三个集合 → 保存
+  `<out>/背景_世界.blend`，可选渲 `预览.png`、写 `导入信息.json`。
+- `py/blender/import_map.py`：原创的 map-only 场景脚本。不建角色、不摆姿势、
+  不审图；装了 MCprep 就走 `prep_materials`，没装/注册失败自动退回内置的
+  「贴图 + 群系乘色 + 调平粗糙度」兜底。
+- `py/pipeline.py:import_map()` / `step_import_blend()`：自动算区域（region 主簇 +
+  出生点）、默认区域中心、Y 范围 0..320、导出缓存、Blender 产物校验。
+- `py/pipeline.py:step_export()` 新增 `textures` / `force` 参数和
+  `_export_cache.json`（存档 mtime + 区域 + 中心 + 半径 + Y 范围 + horizon 作 key）。
+- `py/blender/export_obj.py` 支持 `DSH_MC_TEXTURES` / `--textures`，不再依赖写死的
+  开发机贴图路径；目录不存在会明确报错。
+
+### 说明
+
+- 工作流参考 MCprep / Mineways / MiBlend / MCBlend 的公开做法（OBJ 世界导入 →
+  准备材质 → 归入 MAP 集合）；本项目的存档解析、区域计算、导出、缓存、场景组织
+  是原创实现，不分发也不依赖这些插件，详见 `THIRD_PARTY_NOTICES.md`。
+- `build_cover.py` 的封面流程未改；背景地图是独立入口，避免两套需求互相影响。
+
+---
+
+## [0.5.6] - 2026-11-03
+
+**表情重做：从「只动嘴的黑缝」改为眉毛 / 眼皮 / 瞳孔 / 嘴联动。**
+
+### 变更
+
+- `py/blender/face_kit.py` 换成 BPS 面板控制骨方案：`Eyebrows` / `Eyebrow.R/L`
+  抬压与倾斜，`Top/Bottom Eyelids` 眯眼/瞪眼，`Blink` 闭眼，`Eyes` 移视线，
+  `Left/Right Lip` 微笑/撇嘴，`Mouth` 张嘴；不再旋转 `Head`。
+- 表情启用时放出 BPS 3D 眼/眉/眼皮，并把皮肤脸部画的眼睛/眉毛/嘴盖成肤色，
+  避免「3D 眼 + 皮肤眼」双影；瞳孔颜色从皮肤眼区采样，找不到冷色瞳孔时保留
+  BPS 默认紫瞳（不再拿米色皮肤去染）。
+- 6 个预设重做：happy（抬眉+眯眼+微笑）、angry（怒眉+压眼+皱眉）、
+  sad（内眉上挑+垂眼+皱眉）、surprised（抬眉+瞪眼+张嘴）、curious（单眉+单嘴角）、
+  neutral（平静 3D 脸）；新增 `blink`（眨眼），CLI / `mc_shoot` / 中文别名同步。
+- 显式 `face` 才启用 3D 五官；`face=0` 与 `face=auto` 的非 snapshot 场景仍走
+  旧的皮肤贴图眼睛，不改变既有封面。
+
+### 修复
+
+- 旧版只用 10 根嘴骨，嘴是一条黑色细缝；现在眼睛和眉毛也会动。
+- 修 3D 瞳孔被肤色染成米色、以及皮肤眼与 3D 眼叠成两只眼的问题。
+- 牙片实验移除：BPS 牙齿网格是孤儿网格，临时白条会浮在嘴前，默认不再生成。
+
+## [0.5.5] - 2026-11-02
+
+**新功能：可切换的面部表情库 + 姿势参数接线。**
+
+### 新增
+
+- **`py/blender/face_kit.py`**：BPS 角色表情数据与执行逻辑独立成模块，`build_cover.py` 的
+  `[4.85]` 只负责调用。表情靠 BPS 嘴部骨骼（Top/Bottom Lip *）位移 + 皮肤贴图眼睛，
+  不依赖 3D 眼球；统一隐藏 `mesh eyebrow / eyelids / eye / pupils`，避免换皮后
+  「3D 眉压眼睛 / 双眼睛」。
+- **6 个预设**：`neutral`（平静）、`happy`（愉快，默认细笑线）、`angry`（生气皱眉）、
+  `sad`（难过）、`surprised`（惊讶 O 嘴）、`curious`（单侧嘴角上扬的坏笑）。
+- **`DSH_FACE` 环境变量**：`auto`（默认，仅 `DSH_POSE=snapshot` 时笑，保持旧行为）/
+  `happy|angry|sad|surprised|curious|neutral` / `0` 关闭 / `1` 等价 happy。
+  `DSH_SMILE_SCALE` 缩放位移强度；`DSH_TEETH=1` 可加实验性牙片（默认关，效果一般）。
+- **`mc_shoot` 新增 `face` / `pose` 参数**，CLI 新增 `--face` / `--pose`，
+  `shoot-params.js` 负责白名单与中文别名（愉快/生气/难过/惊讶/好奇/照相…），
+  `pipeline.step_render` 把两者注入 Blender 环境变量。
+- **`pose=snapshot` 正式可用**：双手在胸前比照相取景框，配合 `face=auto` 会自动笑。
+
+### 修复
+
+- 这版 WIP 最初的 `_FACE_SMILE` 会把嘴角向外拉 ±0.06，嘴宽变成半个脸的黑块；
+  现在 happy 用「不拉宽」的小位移（嘴角抬 0.024、下唇中段 -0.020），细笑线更自然。
+- 这版 WIP 最初的牙片放在「头中心沿 -Y 推 0.2565」，但 BPS 头半深是 0.4，
+  牙片一直在脸皮里面看不见；现改为唇骨中点外推 6mm（仍默认关闭）。
+- 表情不会旋转 `Head` 骨骼：实测 4° 就能让 85mm 特写跑出取景框，头姿交给 `POSES`。
+
 ## [0.5.4] - 2026-10-31
 
 **文案版：重写 GitHub 首页与插件商店介绍，出图行为与 0.5.3 完全一致。**

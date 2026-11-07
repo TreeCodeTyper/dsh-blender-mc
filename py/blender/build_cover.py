@@ -786,6 +786,20 @@ if SKIN:
             p(f"    !! 换皮肤失败({type(e).__name__}: {e})，保持 Steve")
 
 # ============================================================
+# ★ 3D 皮肤外层（0.5.8）
+#   把皮肤 outer layer 的不透明像素沿法线挤出，头发/帽子/衣服有厚度。
+#   默认关；DSH_SKIN3D=1 打开，DSH_SKIN3D_THICK 调厚度（格）。
+# ============================================================
+_skin3d_on = (os.environ.get('DSH_SKIN3D') or '').strip().lower()
+if _skin3d_on not in ('', '0', 'off', 'false', 'no'):
+    try:
+        from skin3d import apply_skin3d
+        _thick = float(os.environ.get('DSH_SKIN3D_THICK') or 0.02)
+        apply_skin3d(arm, thickness=max(0.005, min(0.06, _thick)), log=p)
+    except Exception as e:
+        p(f"    !! 3D 皮肤失败({type(e).__name__}: {e})")
+
+# ============================================================
 # ★ 隐藏替身眼睛（工作区副本新增）
 #   理由：用户皮肤的脸（眼睛/眉毛）已经画在头部贴图上。
 #   BPS 自带 mesh eye.l/.r、mesh eyebrow.l/.r、mesh pupils.l/.r，
@@ -794,11 +808,17 @@ if SKIN:
 # ============================================================
 if SKIN:
     hid = []
+    _face_off = (os.environ.get('DSH_FACE') or '').strip().lower() in ('', '0', 'off', 'false', 'no', 'none')
+    _hide_prefixes = ('mesh eye', 'mesh pupil', 'mesh eyebrow', 'mesh eyelids')
+    if _face_off:
+        # 皮肤脸已经画在 64×64 贴图上；BPS 的独立 3D 五官（脸/嘴唇/牙齿）
+        # 会盖住皮肤脸，导致黑眼窝/红嘴。关掉表情时整组隐藏。
+        _hide_prefixes += ('mesh lip', 'mesh mouth', 'mesh teeth')
     for o in bpy.data.objects:
         if o.type != 'MESH':
             continue
         nm = o.name.replace('BPS v4 - ', '').lower()
-        if nm.startswith('mesh eye') or nm.startswith('mesh pupil'):
+        if nm.startswith(_hide_prefixes):
             o.hide_render = True
             hid.append(o.name.replace('BPS v4 - ', ''))
     body = [o for o in body if not o.hide_render]
@@ -888,7 +908,14 @@ if arm:
             _cands = [(a, _facing_probe(a)) for a in range(0, 360, 3)]
             _cands = [(a, r) for a, r in _cands if r is not None]
             if _cands:
-                YAW = min(_cands, key=lambda t: abs(t[1][0] - 45.0))[0]
+                # 目标夹角：默认 45°（标准 3/4 侧脸）。DSH_FACE_ANGLE 可以调，
+                # 20~25° 更接近正面（对称姿势、双手取景框这类要正对镜头时用）。
+                try:
+                    _tgt_ang = float(os.environ.get('DSH_FACE_ANGLE') or 45.0)
+                except ValueError:
+                    _tgt_ang = 45.0
+                _tgt_ang = max(0.0, min(90.0, _tgt_ang))
+                YAW = min(_cands, key=lambda t: abs(t[1][0] - _tgt_ang))[0]
                 _after = _facing_probe(YAW)
                 p(f"    ★ 朝向搜索：yaw {YAW:.0f}°  夹角 {_after[0]:.0f}° → "
                   f"{_after[1]}（相机方位 {CAM_AZ:.0f}°，太阳 {SUN_ROT:.0f}°，"
@@ -984,6 +1011,86 @@ POSES = {
         'Bottom Arm.L': (-64.0, 0.0, 0.0),
         'Hand.L': (0.0, 0.0, -6.0),
     },
+    # 照相姿（v0.5.5 新增）：双手在胸前【握住一个矩形取景框】，头略偏、看着镜头。
+    #   用户原话：「双手比出一个快照，也就是照相的姿势，双手快门合成矩形握在中间」。
+    #   参数是量出来的：肩 -44°/外张 40° + 肘 -84° → 两手落在 (∓0.34, -0.48, 1.36~1.42)，
+    #   间距 0.68 格、正好比头宽一截，矩形在两手之间而脸完全不被挡（嘴的 z≈1.59 在框上方）。
+    #   框体由 [5.6] 段按【两手世界坐标】现场生成，所以换相机/换姿势框会跟着走。
+    'snapshot': {
+        'Torso': (3.0, 0.0, -5.0),
+        'Head': (-5.0, 0.0, 7.0),
+        'Top Arm.R': (-40.0, 0.0, 38.0),
+        'Bottom Arm.R': (-80.0, 0.0, 0.0),
+        'Hand.R': (30.0, 0.0, 0.0),
+        'Top Arm.L': (-40.0, 0.0, -38.0),
+        'Bottom Arm.L': (-80.0, 0.0, 0.0),
+        'Hand.L': (30.0, 0.0, 0.0),
+        'Top Leg.R': (4.0, 0.0, 0.0),
+        'Bottom Leg.R': (-3.0, 0.0, 0.0),
+        'Top Leg.L': (-4.0, 0.0, 0.0),
+        'Bottom Leg.L': (3.0, 0.0, 0.0),
+    },
+    # 跑动：躯干前倾、双臂反向摆、双腿前后跨。
+    'run': {
+        'Torso': (16.0, 0.0, -8.0),
+        'Head': (-10.0, 0.0, 8.0),
+        'Top Arm.R': (32.0, 0.0, 22.0),
+        'Bottom Arm.R': (-30.0, 0.0, 0.0),
+        'Hand.R': (0.0, 0.0, 0.0),
+        'Top Arm.L': (-70.0, 0.0, -18.0),
+        'Bottom Arm.L': (-50.0, 0.0, 0.0),
+        'Hand.L': (0.0, 0.0, 0.0),
+        'Top Leg.R': (50.0, 0.0, 0.0),
+        'Bottom Leg.R': (-75.0, 0.0, 0.0),
+        'Top Leg.L': (-42.0, 0.0, 0.0),
+        'Bottom Leg.L': (30.0, 0.0, 0.0),
+    },
+    # 跳跃：双臂上举、双腿收起。
+    'jump': {
+        'Torso': (-6.0, 0.0, 0.0),
+        'Head': (8.0, 0.0, 0.0),
+        'Top Arm.R': (-80.0, 0.0, 75.0),
+        'Bottom Arm.R': (-10.0, 0.0, 0.0),
+        'Top Arm.L': (-80.0, 0.0, -75.0),
+        'Bottom Arm.L': (-10.0, 0.0, 0.0),
+        'Top Leg.R': (45.0, 0.0, 0.0),
+        'Bottom Leg.R': (-80.0, 0.0, 0.0),
+        'Top Leg.L': (45.0, 0.0, 0.0),
+        'Bottom Leg.L': (-80.0, 0.0, 0.0),
+    },
+    # 指向前方：左臂平举（右手还拿着剑，不挡指向），头朝指向看。
+    'point': {
+        'Torso': (2.0, 0.0, 8.0),
+        'Head': (-2.0, 0.0, -10.0),
+        'Top Arm.L': (-95.0, 0.0, 20.0),
+        'Bottom Arm.L': (0.0, 0.0, 0.0),
+        'Hand.L': (0.0, 0.0, 0.0),
+        'Top Arm.R': (10.0, 0.0, 20.0),
+        'Bottom Arm.R': (-20.0, 0.0, 0.0),
+    },
+    # 挥手：左臂举高、手掌朝外（右手剑保持放下）。
+    'wave': {
+        'Torso': (-2.0, 0.0, 6.0),
+        'Head': (0.0, 0.0, -10.0),
+        'Top Arm.L': (-150.0, 0.0, 35.0),
+        'Bottom Arm.L': (-20.0, 0.0, 0.0),
+        'Hand.L': (0.0, 0.0, 25.0),
+        'Top Arm.R': (10.0, 0.0, 15.0),
+        'Bottom Arm.R': (-15.0, 0.0, 0.0),
+    },
+    # 坐姿：大腿抬到水平、膝盖一弯一伸，躯干侧倾、头微偏。
+    #   不移动 Root —— 腿转平后求值包围盒的最低点变成大腿/臀部，
+    #   落地逻辑会把整个人放到地面上，自然形成坐地效果。
+    'sit': {
+        'Torso': (5.0, 0.0, 8.0),
+        'Head': (-4.0, 0.0, -5.0),
+        'Top Arm.R': (22.0, 0.0, 20.0),
+        'Bottom Arm.R': (-8.0, 0.0, 0.0),
+        'Hand.R': (0.0, 0.0, 0.0),
+        'Top Arm.L': (-70.0, 0.0, -8.0),
+        'Bottom Arm.L': (-35.0, 0.0, 0.0),
+        'Hand.L': (0.0, 0.0, 0.0),
+    },
     # 旧姿势（0.2.x 的站桩抬手），保留用于对比/回退。
     'legacy': {
         'Top Arm.R': (-40.0, 0.0, 42.0),
@@ -1002,6 +1109,15 @@ def pose_right_arm():
         return False
     name = (os.environ.get('DSH_POSE') or 'action').lower()
     spec = POSES.get(name) or POSES['action']
+    # 腿的 IK / Limit Rotation 会锁住脚和膝盖角度，让 FK 旋转被抵消。
+    # 跑/跳/坐改用纯 FK：临时静音两条腿 Top/Bottom 上的全部约束。
+    if name in ('run', 'jump'):
+        for side in ('R', 'L'):
+            for bn in (f'Top Leg.{side}', f'Bottom Leg.{side}'):
+                pb = arm.pose.bones.get(bn)
+                if pb:
+                    for c in pb.constraints:
+                        c.mute = True
     done = []
     for bone, rot in spec.items():
         pb = arm.pose.bones.get(bone)
@@ -1010,14 +1126,58 @@ def pose_right_arm():
         pb.rotation_mode = 'XYZ'
         pb.rotation_euler = tuple(math.radians(v) for v in rot)
         done.append(f"{bone}{rot}")
+    if name == 'sit':
+        # AI 控制层：腿走 IK，骨盆下沉，脚目标落在地面；等价于人在姿态模式里
+        # 把「FK <-> IK」设为 1、拖骨盆和脚上的方形控制器。
+        for side in ('R', 'L'):
+            arm.pose.bones[f'Top Leg.{side}']['FK <-> IK'] = 1.0
+        pel = arm.pose.bones.get('Pelvis')
+        if pel:
+            m = pel.matrix.copy()
+            m.translation.z -= 0.98
+            pel.matrix = m
+        bpy.context.view_layer.update()
+        for side, target in (('R', (-0.20, -0.52, 0.0)),
+                             ('L', (0.20, -0.34, 0.0))):
+            pb = arm.pose.bones.get(f'Leg IK.{side}')
+            if pb:
+                m = pb.matrix.copy()
+                m.translation = mathutils.Vector(target)
+                pb.matrix = m
+        bpy.context.view_layer.update()
     bpy.context.view_layer.update()
-    p(f"    姿势 {name}：{' / '.join(done)}（FK）")
+    p(f"    姿势 {name}：{' / '.join(done)}（{'IK 坐姿' if name == 'sit' else 'FK'}）")
     return bool(done)
 
 
 p("\n[4.8] 摆右臂（FK，举剑）")
 pose_right_arm()
 bpy.context.view_layer.update()
+
+# 坐姿的腿转平后，最低点从脚底变成大腿/臀部；之前的落地位移是按站姿算的，
+# 会让人物悬空约一格。这里按【摆完姿势后】的包围盒再落一次地。
+if (os.environ.get('DSH_POSE') or '').lower() == 'sit' and arm:
+    mn2, mx2 = eval_bbox(body)
+    if mn2 is not None:
+        dz2 = (GROUND - SINK) - mn2.z
+        arm.location.z += dz2
+        bpy.context.view_layer.update()
+        p(f"    坐姿二次落地 dz={dz2:+.3f}")
+
+# ============================================================
+# [4.85] 面部表情库（v0.5.5）
+#   DSH_FACE=auto（默认，只在 DSH_POSE=snapshot 时做 happy）
+#           =happy|angry|sad|surprised|curious|neutral|0
+#   位移数据和各表情的取舍都在 py/blender/face_kit.py，这里只按环境变量调用。
+# ============================================================
+p("\n[4.85] 面部表情")
+try:
+    from face_kit import apply_face_from_env
+    _face_info = apply_face_from_env(arm, log=p)
+    if _face_info is None:
+        p("    (DSH_FACE=auto/0，保持骨架默认表情)")
+except Exception as _e:
+    p(f"    ⚠️ 表情应用失败（继续渲染）：{type(_e).__name__}: {str(_e)[:120]}")
 
 # ============================================================
 # [5] 手持物品（v0.5.0）
@@ -1032,8 +1192,15 @@ bpy.context.view_layer.update()
 p("\n[5] 手持物品（左手 / 右手）")
 
 def _norm_item_spec(v):
-    """允许直接写 MC 物品 id：minecraft:diamond_sword → diamond sword（再交给模糊匹配）。"""
+    """允许直接写 MC 物品 id：minecraft:diamond_sword → diamond sword（再交给模糊匹配）。
+
+    ★ 空手也要能表达：PowerShell 里 `$env:DSH_ITEM_R=''` 等于【删掉变量】，
+      Blender 收不到 → 回落到默认的钻石剑（实测第一版封面人手里举着剑）。
+      所以给一个显式哨兵：none / off / empty / 空手 = 空手。
+    """
     x = (v or '').strip()
+    if x.lower() in ('none', 'off', 'empty', 'no', '空手', '空'):
+        return ''
     for pre in ('minecraft:', 'mc:'):
         if x.lower().startswith(pre):
             x = x[len(pre):]
@@ -2350,7 +2517,10 @@ if TREES_N > 0:
         p(f"    机位参考 {tuple(round(v, 1) for v in cam_p)}（只种挡不住的树）")
         planted = []
         for (tx, ty, gz, behind, u, v) in _spots:
-            sp = rnd.choice(['oak', 'oak', 'birch', 'spruce'])
+            # DSH_TREE_TYPE=oak|birch|spruce 可强制树种（默认按 2:1:1 随机）
+            _force = (os.environ.get('DSH_TREE_TYPE') or '').strip().lower()
+            sp = _force if _force in _SPECIES \
+                else rnd.choice(['oak', 'oak', 'birch', 'spruce'])
             h = int(round(rnd.uniform(*TREE_H)))
             ob = _plant_tree(tx, ty, gz, h, sp)
             if ob is None:
@@ -2368,6 +2538,73 @@ if TREES_N > 0:
                       f"太挤 {_c['near']} / 无地面 {_c['ground']} / 被挡 {_c['hidden']}")
 else:
     p("    (DSH_TREES=0，不种树)")
+
+# ============================================================
+# [5.55] 白桦林环（DSH_TREE_RING）—— 不信存档，自己点名种一圈
+#
+#   为什么要这个：m_3d6e44fbc639 的白桦林是密林 + 坡地，扫出来的唯一平地
+#   是个 9×9 的南瓜田；[5.5] 的撒点又是按 105mm 长焦标定的
+#   （|u|*tan_h*behind ≥ 4.5 格 才留），换 55mm 以后几乎全被这条卡掉 ——
+#   实测 16 棵只种下 2 棵，还都在 40 格开外，画面里一棵白桦都没有。
+#   所以给一个【确定性】摆法：绕人物按角度 + 半径直接点名种，
+#   只要地平（±2.5 格内）就种，不做画面撒点。
+#
+#   DSH_TREE_RING=12          种几棵（0/不给 = 不用）
+#   DSH_TREE_RING_R=5,9       半径区间（格）
+#   DSH_TREE_RING_SPREAD=150  以"人物正后方"为中心张开的角度（度）
+#   DSH_TREE_TYPE=birch       树种（默认 birch）
+#   DSH_TREE_RING_SEED=7      随机种子
+# ============================================================
+_ring_n = 0
+try:
+    _ring_n = int(os.environ.get('DSH_TREE_RING') or 0)
+except ValueError:
+    _ring_n = 0
+
+if _ring_n > 0:
+    if not _TEX_DIRS:
+        p("    !! 白桦林环：找不到方块贴图目录 → 跳过")
+    else:
+        _ra = _random.Random(int(os.environ.get('DSH_TREE_RING_SEED') or 7))
+        _r_txt = (os.environ.get('DSH_TREE_RING_R') or '5,9').replace(' ', '')
+        try:
+            _r0, _r1 = [float(t) for t in _r_txt.split(',')[:2]]
+        except ValueError:
+            _r0, _r1 = 5.0, 9.0
+        _spread = float(os.environ.get('DSH_TREE_RING_SPREAD') or 150.0)
+        _sp = (os.environ.get('DSH_TREE_TYPE') or 'birch').strip().lower()
+        if _sp not in _SPECIES:
+            _sp = 'birch'
+        _ca = math.radians(CAM_AZ)
+        _base_ang = math.atan2(-math.sin(_ca), math.cos(_ca))   # 相机→人物的方位
+        p(f"\n[5.55] 白桦林环：{_ring_n} 棵 {_sp}  半径 {_r0:.0f}-{_r1:.0f}  "
+          f"张开 {_spread:.0f}°")
+        _got = 0
+        for _i in range(_ring_n):
+            _frac = (_i + 0.5) / _ring_n
+            _off = math.radians(_spread * (_frac - 0.5))
+            # 两排交错：奇偶各占一段半径，避免所有树站在同一个圆上
+            _row = 0.0 if _i % 2 == 0 else 1.0
+            _rad = (_r0 + (_r1 - _r0) * (0.15 + 0.75 * _row)
+                    + _ra.uniform(-0.6, 0.6))
+            _ang = _base_ang + _off + _ra.uniform(-0.05, 0.05)
+            _tx = WX + math.cos(_ang) * _rad
+            # ★ 符号别搞反：相机方位 a 时 f=(cos a, -sin a) 是「相机→人物」，
+            #   人物正后方是 WY - sin(a)*r。第一版写成 +sin 把整圈树翻到了
+            #   相机这一侧，机位直接被种进树干里（渲染出来一片蓝色糊）。
+            _ty = WY + math.sin(_ang) * _rad
+            _gz = _ground_at(_tx, _ty, GROUND)
+            if _gz is None or abs(_gz - GROUND) > 2.5:
+                p(f"    树 {_i+1}: 跳过（地面 {_gz} 与人物差太大）")
+                continue
+            _h = int(round(_ra.uniform(*TREE_H)))
+            _ob = _plant_tree(_tx, _ty, _gz, _h, _sp)
+            if _ob is None:
+                continue
+            _got += 1
+            p(f"    树 {_got}: {_sp} 高 {_h}  位置 ({_tx:.1f}, {_ty:.1f})  "
+              f"地面 z={_gz:.2f}  半径 {_rad:.1f} 格")
+        p(f"    共种下 {_got}/{_ring_n} 棵")
 
 # ============================================================
 # ★ 自带模型（BYO models）—— 插件不附带任何模型 / 贴图
@@ -2494,6 +2731,159 @@ if _models:
     p(f"\n[5.5] 自带模型 {len(_models)} 个")
 for _i, _cfg in enumerate(_models, 1):
     import_model(_i, _cfg)
+
+# ============================================================
+# [5.6] 取景框道具（DSH_FRAME，v0.5.5）
+#
+#   为什么要道具：MC 的手是 4×4 的方块，两根手指「比」不出矩形 ——
+#   实测（probe1~probe9）只靠摆手形，看的人只会读成"捧脸/僵尸手"。
+#   改成让两只手【握住】一个矩形框，框在两手之间，意图立刻成立。
+#
+#   ★ 尺寸和位置全部从【两手骨骼的世界坐标】反推，不写死数值：
+#     换姿势 / 换骨架 / 微调角度，框都会自动跟着手走。
+#   ★ 用户原话：「双手快门合成矩形握在中间」—— 框必须【在两手中间】，
+#     不能贴脸（会像 VR 眼镜把五官压掉，实测 FAIL）。
+#
+#   DSH_FRAME=auto（默认，只在 DSH_POSE=snapshot 时出现）| 1（总是）| 0（关）
+#   DSH_FRAME_W / DSH_FRAME_H  覆盖自动算出的宽高（格）
+# ============================================================
+_FRAME_ENV = (os.environ.get('DSH_FRAME') or 'auto').strip().lower()
+FRAME_ON = _FRAME_ENV not in ('0', 'off', 'false', 'no') and (
+    _FRAME_ENV not in ('', 'auto')
+    or (os.environ.get('DSH_POSE') or '').strip().lower() == 'snapshot')
+
+
+def _frame_mat(name, hexcol, rough, metal=0.0, emit=0.0):
+    m = bpy.data.materials.get(name)
+    if m is not None:
+        return m
+    m = bpy.data.materials.new(name)
+    m.use_nodes = True
+    nt_ = m.node_tree
+    b_ = nt_.nodes.get('Principled BSDF')
+    rgb = _hex_to_rgb(hexcol)
+    lin = (_srgb_to_linear(rgb[0]), _srgb_to_linear(rgb[1]),
+           _srgb_to_linear(rgb[2]), 1.0)
+    if b_ is not None:
+        b_.inputs['Base Color'].default_value = lin
+        b_.inputs['Roughness'].default_value = rough
+        try:
+            b_.inputs['Metallic'].default_value = metal
+        except Exception:
+            pass
+        if emit > 0:
+            for k in ('Emission Color', 'Emission'):
+                if k in b_.inputs:
+                    b_.inputs[k].default_value = lin
+                    break
+            if 'Emission Strength' in b_.inputs:
+                b_.inputs['Emission Strength'].default_value = emit
+    return m
+
+
+def _hand_local(side):
+    """取 Hand.<side> 骨骼头部【骨架局部坐标】。
+
+    ★ 必须用局部坐标：骨架对象被摆到了地图上的世界位置（实测 y=+2428），
+      直接乘 matrix_world 会得到几千格的 y，任何"-0.25 才算伸到身前"的判断
+      都会失效（第一版就是这么被跳过的）。
+    """
+    try:
+        arm = bpy.data.objects['BPS Character Rig']
+        return arm, arm.pose.bones['Hand.' + side].head.copy()
+    except Exception:
+        return None, None
+
+
+def _build_frame():
+    arm, hr = _hand_local('R')
+    _, hl = _hand_local('L')
+    if hr is None or hl is None:
+        p("    !! 找不到 Hand.R / Hand.L 骨骼，跳过取景框")
+        return []
+    # 局部坐标下角色朝 -Y：两只手都得伸到身前
+    if hr.y > -0.25 or hl.y > -0.25:
+        p(f"    !! 双手还没伸到身前（局部 y={hr.y:.2f}/{hl.y:.2f}），跳过取景框")
+        return []
+
+    dx = abs(hl.x - hr.x)
+    dz = abs(hl.z - hr.z)
+    # ★ 单位坑：骨架数据空间比世界大 1.6 倍（armature 世界缩放 ~0.625），
+    #   pb.head 拿到的是【数据空间】坐标（肩 z=2.25、手 z=2.27），
+    #   直接当米用会做出一个 1.13 格宽、20 cm 厚的巨型框（第一版实测）。
+    #   统一做法：手的位置用局部值，框的【尺寸】按世界米设计，再除以 k 换回局部。
+    k = arm.matrix_world.to_scale().x or 1.0
+    dx_w = dx * k
+    try:
+        fw_w = float(os.environ.get('DSH_FRAME_W') or 0) or (dx_w + 0.04)
+        fh_w = float(os.environ.get('DSH_FRAME_H') or 0) or 0.34
+    except ValueError:
+        fw_w, fh_w = dx_w + 0.04, 0.34
+    fw, fh = fw_w / k, fh_w / k          # 局部单位（仅用于算条的位置）
+    # 手如果高低不齐（躯干 twist），框心取两手中点，框体跟着手连线微微倾斜
+    cx = (hr.x + hl.x) / 2.0
+    cy = min(hr.y, hl.y) - 0.01
+    cz = (hr.z + hl.z) / 2.0
+    # 两手高低不齐时（躯干 twist）框不许跟着歪 —— 取景框歪着读不出"矩形取景框"，
+    # 实测歪 15° 以上就像随手拿的相框。所以只保留 ±4° 以内的自然倾斜。
+    tilt = math.atan2(hl.z - hr.z, hl.x - hr.x)
+    tilt = max(-math.radians(4.0), min(math.radians(4.0), tilt))
+
+    yaw = arm.rotation_euler.z
+    mw = arm.matrix_world.copy()
+    p(f"    取景框 {fw_w:.2f} x {fh_w:.2f} 格（世界里）  局部中心"
+      f" ({cx:.2f}, {cy:.2f}, {cz:.2f})  单位换算 k={k:.3f}")
+    p(f"    双手间距 {dx_w:.2f} 格 / 高差 {dz * k:.2f} / "
+      f"倾斜 {math.degrees(tilt):+.1f}° / 朝向 yaw={math.degrees(yaw):.0f}°")
+
+    mat_frame = _frame_mat('FrameBody', '#e8e2d6', 0.38, 0.10)
+    mat_hud = _frame_mat('FrameHUD', '#2e2a26', 0.45, 0.05)
+
+    bar_w = max(0.030, min(0.050, fw_w * 0.055))     # 框条粗细（世界）
+    bar = bar_w / k                                   # 框条粗细（局部）
+    tick_w = bar_w * 0.42                             # 内侧 HUD 角标（世界）
+    thick_w = 0.07                                    # 框体厚度（世界）
+
+    ct, st = math.cos(tilt), math.sin(tilt)
+
+    def _bar(w_w, h_w, lx, lz, mat, name):
+        """在框体局部坐标 (lx,lz) 放一根世界里 w_w × h_w 的条。"""
+        wp = mw @ mathutils.Vector((cx + lx * ct + lz * st, cy,
+                                    cz - lx * st + lz * ct))
+        bpy.ops.mesh.primitive_cube_add(size=1.0, location=wp)
+        ob = bpy.context.active_object
+        ob.name = name
+        ob.scale = (w_w, thick_w, h_w)
+        ob.rotation_euler = (0.0, tilt, yaw)
+        ob.data.materials.clear()
+        ob.data.materials.append(mat)
+        return ob
+
+    made = []
+    half_w = fw / 2.0 - bar / 2.0
+    half_h = fh / 2.0 - bar / 2.0
+    made.append(_bar(fw_w, bar_w, 0.0, half_h, mat_frame, 'FrameTop'))
+    made.append(_bar(fw_w, bar_w, 0.0, -half_h, mat_frame, 'FrameBottom'))
+    made.append(_bar(bar_w, fh_w, -half_w, 0.0, mat_frame, 'FrameLeft'))
+    made.append(_bar(bar_w, fh_w, half_w, 0.0, mat_frame, 'FrameRight'))
+    # 四角内侧的浅色角标：让它在树林背景里读得出来是"取景框"而不是木框
+    for sx in (-1, 1):
+        for sz in (-1, 1):
+            made.append(_bar(tick_w * 2.4, tick_w, sx * (half_w - tick_w * 1.4 / k),
+                             sz * (half_h - tick_w * 0.7 / k), mat_hud, 'FrameTickH'))
+            made.append(_bar(tick_w, tick_w * 2.4, sx * (half_w - tick_w * 0.7 / k),
+                             sz * (half_h - tick_w * 1.4 / k), mat_hud, 'FrameTickV'))
+    bpy.context.view_layer.update()
+    return made
+
+
+if FRAME_ON:
+    p("\n[5.6] 取景框道具")
+    _frame_objs = _build_frame()
+    if _frame_objs:
+        p(f"    共 {len(_frame_objs)} 根条")
+else:
+    p("\n[5.6] 取景框：(关)")
 
 # ---- 天空 ----
 p("\n[6] Blender 物理天空")
@@ -2923,6 +3313,39 @@ p(f"    {scn.render.engine} / {SAMPLES} 采样 / 视图转换={vt} / look={look_
 #   pipeline 会把这个框传给 vision_check，让它"在框里判是什么"，
 #   而不是按颜色满画面找主体（大草原背景绿/天空蓝，颜色判据不可靠）。
 # ============================================================
+def project_object_box(obj, inset=0.0):
+    """把单个网格对象的包围盒投影成像素框；用于精确头部框。"""
+    try:
+        from bpy_extras.object_utils import world_to_camera_view
+    except Exception as e:
+        return None, [f"world_to_camera_view 不可用: {e}"]
+    bmin, bmax = eval_bbox([obj])
+    if bmin is None:
+        return None, [f"{getattr(obj, 'name', obj)} 包围盒取不到"]
+    notes = []
+    us, vs = [], []
+    for cx in (bmin.x, bmax.x):
+        for cy in (bmin.y, bmax.y):
+            for cz in (bmin.z, bmax.z):
+                co = world_to_camera_view(scn, cam, mathutils.Vector((cx, cy, cz)))
+                if co.z <= 0:
+                    notes.append("有角点在相机后方（z<=0）")
+                us.append(co.x)
+                vs.append(co.y)
+    u0, u1 = min(us), max(us)
+    v0, v1 = min(vs), max(vs)
+    x0, y0, x1, y1 = [u0 * RES_X, (1.0 - v1) * RES_Y,
+                      u1 * RES_X, (1.0 - v0) * RES_Y]
+    ix, iy = (x1 - x0) * inset, (y1 - y0) * inset
+    box = [x0 + ix, y0 + iy, x1 - ix, y1 - iy]
+    box = [min(max(0.0, box[0]), RES_X), min(max(0.0, box[1]), RES_Y),
+           min(max(0.0, box[2]), RES_X), min(max(0.0, box[3]), RES_Y)]
+    box = [int(round(v)) for v in box]
+    if box[2] - box[0] < 4 or box[3] - box[1] < 4:
+        return None, notes + [f"投影框太小 {box}"]
+    return box, notes
+
+
 def project_subject_box():
     """返回 (box, raw, notes)。box 为 [x0,y0,x1,y1] 像素（左上原点）。"""
     try:
@@ -2972,9 +3395,22 @@ if _subject_notes:
     for _n in _subject_notes:
         p(f"    ⚠️ 审图框: {_n}")
 p(f"    主体框 {_subject_box}  （原始投影 {_subject_raw}，画面 {RES_X}x{RES_Y}）")
+
+# ★ 头部框独立投影：主体包围盒在「举剑/抬臂」时顶部是手臂/剑，
+#   拿主体框顶部 22% 当脸会把正面误判成背面。这里直接投 head 网格。
+_head_box = None
+_head_notes = []
+if _head is not None:
+    _head_box, _head_notes = project_object_box(_head, inset=0.06)
+    p(f"    头部框 {_head_box}")
+else:
+    _head_notes.append("没有 head 网格")
+for _n in _head_notes:
+    p(f"    ⚠️ 头部框: {_n}")
 try:
     with open(os.path.join(OUT, '_subject_box.json'), 'w', encoding='utf-8') as f:
         json.dump({'subject_box': _subject_box, 'raw': _subject_raw,
+                   'head_box': _head_box, 'head_notes': _head_notes,
                    'size': [RES_X, RES_Y],
                    'source': 'world_to_camera_view(body eval_bbox)',
                    'notes': _subject_notes}, f, ensure_ascii=False, indent=2)
