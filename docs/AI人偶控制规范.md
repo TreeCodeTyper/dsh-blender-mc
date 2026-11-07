@@ -110,7 +110,9 @@ critique() ->  渲染后视觉/接触/平衡检查，不达标重解
 - ✅ 单测 `py/test_char_control.py`：editorial 提示词能编译成 sit / 9:16 / pelvis=0.15 / calm。
 - ✅ `ai-rig` M1：程序化方块人、骨架、权重、解析 IK、`apply_spec()`；`mc_ai_char` 已接。
 - ✅ M2 第一版：64×64 Steve/Alex 皮肤 UV 贴到全部身体块，脸直接来自皮肤；默认 rig 为 `AI_Character_Rig_v0.3.blend`。
-- ⏳ 风格/皮肤/脸：M2。
+- ✅ 0.6.0：`skin3d` 3D 皮肤外层（头/胸/腰 overlay，`DSH_AI_SKIN3D=1` 或 `mc_ai_char.skin3d`），
+  rig 名带 `_3d`；手臂/腿尚未做外壳。
+- ⏳ 风格/皮肤/脸：M2（嘴部 UV 仍未解决）。
 - ⏳ observe/control/critique：M3。
 - ✅ 公开参考声明：`THIRD_PARTY_NOTICES.md`（BPS/BSS/Simple/Mob/MiBlend/MCBlend 只参考思路，不复制资产/代码）。
 

@@ -331,6 +331,10 @@ python py/cli.py anim <封面工程.blend> --out <目录> [--preview 1,60,120]
 python py/cli.py anim <封面工程.blend> --preset yujian --out <目录>   # 御剑飞天
 python py/cli.py anim <封面工程.blend> --preset <配方名> --out <目录>  # 自己写的配方
 
+# 一句话出片：中文提示词 → 时长/动作/机位（0.6.0）
+python py/cli.py anim <封面工程.blend> --prompt "10秒跑步，低机位，跟拍" --out <目录>
+python py/cli.py film --blend <封面工程.blend> --prompt "5秒跑步，低机位，跟拍" --out <目录> --animatic
+
 # 分镜成片：一份分镜表 → 多镜头渲染 → 按顺序剪成一支 MP4（同时写 分镜表.md）
 python py/cli.py film --plan 分镜.json --out <目录> [--animatic]
 
@@ -344,7 +348,7 @@ python py/cli.py map list | resolve --name <名字> | rename | delete | default 
 
 ### 一句话出片：分镜成片（0.4.0）
 
-`mc_anim` 出来的是**一条 240 帧的长镜头**。真实片子是"分镜表定几个镜头，每镜单独渲，
+`mc_anim` 出来的是**一条长镜头**（默认 240 帧，提示词/`--frames` 可改时长；循环动作自动补遍数，非循环动作整条重定时）。真实片子是"分镜表定几个镜头，每镜单独渲，
 最后剪起来"——这就是 `mc_film` 干的事，你只要说一句话：
 
 > 把刚才的御剑飞天剪成 10 秒：先中景看符阵亮、再低机位仰拍冲天、最后大远景飞进云里
