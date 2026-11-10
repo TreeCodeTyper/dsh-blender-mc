@@ -6,6 +6,66 @@
 
 ---
 
+## [0.6.1] - 2026-11-10
+
+**出图 111 秒 → 38.6 秒；背景可选「干净档」；动画多 6 支动作 + 一套运镜 DSL；每次跑完自动落任务档案。**
+
+### 性能
+
+- **单进程多阶段渲染**：一次 Blender 启动里连渲「试渲档 + 定稿档」，不再每轮
+  `--factory-startup` 重开。实测 111.12s → 67.4s。
+- **默认 GPU 后端改 Vulkan**（`--gpu-backend vulkan`，`DSH_GPU_BACKEND` 可关）：实测再降到
+  38.63s（1920×1080）。与 OpenGL 出图逐像素对比 mean 0.004 / max 2，画质无差；
+  启动失败会自动退回 OpenGL 重试一次。
+- 采样默认 192 → 48（试渲档固定 16）、体积雾 96 → 32、最多重试 3 → 2；结果里多
+  `timings`（导出 / 渲染 / 审图 / 总计）。
+
+### 背景
+
+- `backdrop=world|clean|studio`：`clean` 隐藏导出的整块地形、补一块草地贴图地面 ——
+  「背景里有其他方块」（半径处土墙切面、建筑残骸、树冠）直接消失。默认仍是 `world`。
+- `rim_scale` 单独控制轮廓光；auto_adjust 新增两条修法（补 rim、Standard→AgX），
+  不再动不动报「没有可自动修的项」。
+
+### 任务档案
+
+- 新增 `py/runs.py`：`~/.dsh/blender-mc/runs/<时间>_<kind>.json` 记 goal / inputs / params /
+  artifacts / verdict / score / next_action / replay。shoot、anim、film 跑完自动落档。
+- `python py/cli.py runs dir|list|show|replay`；`shoot --goal "..."` 给这次任务写一句目的。
+
+### 动画
+
+- 6 支新配方：`cast` 施法推掌 / `block` 格挡 / `taunt` 挑衅招手 / `idle_shift` 待机换重心 /
+  `fall` 坠落 / `land` 落地砸击。
+- 新运动原子 `MOTIONS['drop']`：重力曲线 + 落地回弹（`fly` 只能往上飞、`leap` 起跳落回原处，
+  都做不出「一开始就在半空」）。
+- **运镜 DSL `camera.moves`**：`push_in` / `pull_out` / `orbit` / `crane_up` / `crane_down` /
+  `rise` / `aim` / `dutch` / `handheld`，可逐帧叠加、带缓动；`run` / `walk` / `ride` 已接上
+  30–46° 环绕。
+- **站姿双腿岔开**：BPS 的腿在 FK 下只能前后摆（Y/Z 是沿骨长扭转，实测 8°→45° 都只是把裤子
+  拧一下，两条腿始终粘成一根柱子），改走 IK —— 两只脚目标外移 + 前后错开。
+  `DSH_STANCE` / `DSH_STANCE_X` / `DSH_STANCE_FWD` 可调。
+
+### 成片
+
+- 分镜表每镜可换工程/时段/雾：`blend` / `hour` / `fog`；`transition{type,dur}` 支持
+  `cut` / `xfade` / `dip`（每镜先各自编码，再用 ffmpeg filter_complex 串）。
+
+### 修复
+
+- `anim --frames` 默认写死 240，把配方自带的 duration 拉长 2.5 倍（96 帧落地动作的落地帧
+  从第 34 帧跑到第 86 帧）；现在不传就用配方 duration。
+- 渲染命令不给 `-o`，复用工程时帧写到上一个镜头的目录（表现为某镜 0 帧、另一镜双倍帧）。
+- 干净档的草地贴图本身是灰度（MC 靠群系 tint 上色），直接贴是灰蓝；改为复用导出的草地材质，
+  退化为乘法上色。
+
+### 文档
+
+- 新增 `docs/脚本地图.md`：39 个 `.py` 里只有 4 个入口，13 个工具各自的落点表。
+- `py/blender/presets/README.md` 补 `drop` 运动、`camera.moves` 和 6 支新配方。
+
+---
+
 ## [0.6.0] - 2026-11-07
 
 **地图查找从暴力扫描换成 2.5D 地形算法，接口不变；补提示词动画、AI 人偶 3D 皮肤与本地存档读取。**

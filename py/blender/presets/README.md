@@ -204,6 +204,39 @@ BPS Rig 上 1 个 `Root.location` 单位 ≈ 0.625 世界单位，别拿骨骼�
 `start` 是起始帧、`dur` 是持续帧数；`ease` 支持 `inout`（默认 smoothstep）、`linear`、
 `in`、`out`、`hold`。多段会叠加 —— 所以「推进 + 绕半圈 + 手持」是三行配置，不用写代码。
 
+### camera.moves —— 运镜叠层（0.6.1）
+
+上面那四条轨道（az/dist/lens/rise）只能画「一条从 A 到 B 的斜线」。真正拍片子要的是
+"推进 + 绕半圈 + 手持微抖"叠在一起 —— `camera.moves` 就是干这个的：一组在基础轨道上
+**叠加**的运动，按帧从 0 涨到 `amount`。
+
+```jsonc
+"camera": {
+  "az": [[1, 265], [80, 261]], "dist": [[1, 7.0], [80, 7.6]],
+  "moves": [
+    {"type": "orbit",    "start": 1, "dur": 80, "amount": 38, "ease": "linear"},
+    {"type": "push_in",  "start": 6, "dur": 58, "amount": 0.18},
+    {"type": "handheld", "start": 1, "dur": 80, "amount": 0.9}
+  ]
+}
+```
+
+| type | 作用 | `amount` 的单位 |
+|---|---|---|
+| `push_in` | 往主体推进 | 比例（0.18 = 距离缩短 18%） |
+| `pull_out` / `dolly` | 后退 | 比例 |
+| `orbit` | 绕主体转 | 度（38 = 转 38°） |
+| `crane_up` / `crane_down` | 升降机 | 格 |
+| `rise` | 改「相机跟随角色高度」的比例 | 0–1 |
+| `aim` | 抬高/压低瞄准点 | 格 |
+| `dutch` | 画面滚转（倾斜构图） | 度 |
+| `handheld` | 手持微抖（正弦，不改构图） | 幅度 |
+
+`ease`：`inout`（默认，smoothstep）/ `linear`（匀速，环绕用这个）/ `in` / `out` / `hold`（到帧直接跳）。
+
+⚠️ 叠加是"逐帧算完再打关键帧"，所以和 `film` 的分镜覆盖（`DSH_YJ_CAM_*`）能同时用：
+`moves` 负责运动形状，环境变量负责这个镜头从哪个角度起拍。
+
 ### lights / render
 
 ```jsonc

@@ -326,6 +326,9 @@ python py/cli.py scan <存档> --area x0,x1,z0,z1
 # 出封面（含审图闭环）
 python py/cli.py shoot <存档> --area x0,x1,z0,z1 --out <目录>
 
+# 背景要干净（藏掉导出的整块地形，只留一块草地地皮）—— 自定义布景/抠图用
+python py/cli.py shoot <存档> --area x0,x1,z0,z1 --out <目录> --backdrop clean
+
 # 出动画（默认 10 秒杀戮光环）
 python py/cli.py anim <封面工程.blend> --out <目录> [--preview 1,60,120]
 python py/cli.py anim <封面工程.blend> --preset yujian --out <目录>   # 御剑飞天
@@ -344,6 +347,11 @@ python py/cli.py check <图...> [--json]
 # 地图库：把存档 zip 收进来（DSH 面板做的是同一件事）
 python py/cli.py map import --zip <存档.zip> [--name 名字]
 python py/cli.py map list | resolve --name <名字> | rename | delete | default | doctor
+
+# 任务档案：每次 shoot / anim / film 跑完自动落档，能列、能看、能重放
+python py/cli.py runs list
+python py/cli.py runs show <id>      # 这次用的参数、产物、审图结论、下一步
+python py/cli.py runs replay <id>    # 同参数重跑（导出的 .obj 会命中缓存）
 ```
 
 ### 一句话出片：分镜成片（0.4.0）
@@ -406,12 +414,57 @@ python py/cli.py anim 封面.blend --preset <新名字> --out .\out
 
 | 表 | 管什么 | 什么时候要动它 |
 |---|---|---|
-| `MOTIONS` | 运动形状（`fly`=沿轴飞+转身+俯仰侧倾） | 要"绕柱子螺旋"这种新形状 |
+| `MOTIONS` | 运动形状（`fly` 沿轴飞 / `ground` 贴地匀速 / `leap` 起跳平飞降落 / `drop` 高处坠落） | 要"绕柱子螺旋"这种新形状 |
 | `WEAPONS` | 载具/道具姿态（`ridden_sword`=把剑放大横在脚下） | 要"双剑交叉""御符"这种新载具 |
 | `FX` | 特效种类（`rune_ring`/`shockwave`/`trail`/`streaks`/`particles`） | 要全新视觉元素 |
+| `camera.moves` | 运镜叠加（`push_in`/`orbit`/`crane_up`/`handheld`…，不是函数，是 JSON 数组） | 要新的镜头语言 —— 先试 moves，不够再加函数 |
 
 **这三张表够用时，新动画就是纯配置。** 不够时往表里加一个函数，所有旧配方不受影响——
 这就是复用的边界：改一处，全体受益；加一个，不碰旧的。
+
+### 0.6.1：快了 3 倍、背景可选干净、跑完自动落档
+
+**速度。** 同一台机器、同一张封面：原来 111 秒，现在 **38.6 秒**（1920×1080，PASS 80 分）。
+两个原因：一次 Blender 启动里连渲「试渲档 960×540/16 + 定稿档 1080p/48」（以前每轮都
+`--factory-startup` 重开，40 秒全花在着色器编译上），以及默认 GPU 后端换成 **Vulkan**
+（同一份工程 42.2s → 12.2s，逐像素差 mean 0.004）。采样数和体积雾也顺手降了：
+`--samples` 默认 48、`--vol-samples` 默认 32、`--attempts` 默认 2。
+
+```bash
+# 想关掉 Vulkan 退回 OpenGL：
+DSH_GPU_BACKEND=none python py/cli.py shoot ...
+```
+
+**背景干净档。** 以前半径 44 把整块地形、建筑残骸、树冠全导出，画面里就会出现「凭空多出来
+的土墙」。现在 `--backdrop clean` 会藏掉导出地形、补一块草地贴图地面：
+
+```bash
+python py/cli.py shoot <存档> --area ... --out ... --backdrop clean --rim-scale 1.8
+```
+
+三档：`world`（默认，用真实地图）/ `clean`（平地 + 干净天空）/ `studio`（棚拍）。
+
+**任务档案。** 跑完自动写 `~/.dsh/blender-mc/runs/<时间>_<kind>.json`，记下这次的目标、参数、
+产物、审图结论和「下一步该改什么」。下次想复现，`runs replay <id>` 就行；不想让它全丢，
+`shoot --goal "青坪草地封面"` 写个人话目的。
+
+**动画。** 6 支新配方（`cast` / `block` / `taunt` / `idle_shift` / `fall` / `land`）、一个
+`drop` 运动原子（高处坠落 / 落地砸击），以及 **`camera.moves` 运镜 DSL** —— 以前机位只能是
+一条从 A 到 B 的斜线，现在能写「推进 + 慢慢绕 40° + 手持微抖」：
+
+```json
+"camera": {
+  "az": [[1, 265], [80, 261]], "dist": [[1, 7.0], [80, 7.6]],
+  "moves": [
+    {"type": "orbit",    "start": 1, "dur": 80, "amount": 38, "ease": "linear"},
+    {"type": "push_in",  "start": 6, "dur": 58, "amount": 0.18},
+    {"type": "handheld", "start": 1, "dur": 80, "amount": 0.9}
+  ]
+}
+```
+
+**成片换场景 + 转场。** 分镜表每镜可以 `blend`（换工程 = 真换地图）、`hour`、`fog`，
+以及 `transition: {type: cut|xfade|dip, dur}`。
 
 ### 在 DSH 里直接用
 
