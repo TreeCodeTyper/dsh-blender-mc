@@ -159,7 +159,33 @@ def _norm_shot(shot, i, plan):
         f0, f1 = f1, f0
     s['range'] = [f0, f1]
     s['frames'] = f1 - f0 + 1
-    s['env'] = {str(k): str(v) for k, v in (s.get('env') or {}).items()}
+    # ★ P1-1 场景覆盖：每镜可以换工程 / 换时间 / 换雾
+    #   blend：这一镜用另一个封面工程（= 真的换场景，不是把机位挪一挪）
+    #   hour / fog：折算成环境变量，交给动画脚本读（读不到也无害）
+    s['blend'] = s.get('blend')
+    env = {str(k): str(v) for k, v in (s.get('env') or {}).items()}
+    if s.get('hour') is not None:
+        env.setdefault('DSH_HOUR', str(s['hour']))
+    if s.get('fog') is not None:
+        env.setdefault('DSH_FOG', str(s['fog']))
+    s['env'] = env
+    # ★ P1-1 转场：这一镜【进入时】用的过渡（首镜忽略）
+    tr = s.get('transition') or {}
+    if isinstance(tr, str):
+        tr = {'type': tr}
+    ttype = str(tr.get('type') or 'cut').lower()
+    if ttype in ('none', 'off', ''):
+        ttype = 'cut'
+    if ttype not in ('cut', 'xfade', 'dip', 'fade'):
+        raise ValueError('镜头 %s 的 transition.type 只认 cut / xfade / dip，收到 %r'
+                         % (s['id'], ttype))
+    dur = float(tr.get('dur') or 0.0)
+    if ttype == 'cut':
+        dur = 0.0
+    elif dur <= 0:
+        dur = 0.4                      # 不给时长就 0.4 秒，差不多是 10 帧
+    s['transition'] = {'type': ('dip' if ttype in ('dip', 'fade') else ttype),
+                       'dur': round(dur, 3)}
     return s
 
 
@@ -186,6 +212,74 @@ def _load_camera_path(plan, base):
     with open(p, 'r', encoding='utf-8') as f:
         data = json.load(f)
     return data if isinstance(data, dict) else {'points': data}
+
+
+def _stitch_with_transitions(ffmpeg, segments, shots, out_dir, plan, fps, res,
+                             crf, progress=print):
+    """带转场的拼接：每镜先各自编码成 mp4，再用 ffmpeg 的 concat / xfade 串起来。
+
+    为什么不用原来的「所有帧复制进一个 seq 再一次性编码」：转场需要【两段画面
+    重叠】，帧序列拼不出重叠；而 ffmpeg 的 xfade 天生干这个。
+      cut   → concat（不加混合，帧数不变）
+      xfade → xfade=transition=fade（叠化，时长内重叠，总帧数变少）
+      dip   → xfade=transition=fadeblack（先黑下去再起来）
+    返回 (mp4 路径, 成片总帧数)。
+    """
+    work = os.path.join(out_dir, '_trans')
+    if os.path.isdir(work):
+        shutil.rmtree(work)
+    os.makedirs(work, exist_ok=True)
+    inputs, durs = [], []
+    for k, (s, d, frames) in enumerate(segments):
+        start = int(shots[k]['range'][0])
+        mp4_k = os.path.join(work, 'seg_%02d_%s.mp4' % (k, s['id']))
+        rc, out = pipeline.run([
+            ffmpeg, '-y', '-framerate', '%g' % fps,
+            '-start_number', str(start),
+            '-i', os.path.join(d, 'frame_%04d.png'),
+            '-c:v', 'libx264', '-crf', crf, '-pix_fmt', 'yuv420p',
+            '-r', '%g' % fps, mp4_k], log=os.path.join(d, '_seg_encode.log'))
+        if rc != 0:
+            raise RuntimeError('镜头 %s 编码失败\n%s' % (s['id'], out[-1200:]))
+        inputs.append(mp4_k)
+        durs.append(len(frames) / float(fps))
+
+    parts, cur = [], '[0:v]'
+    total = durs[0]
+    for k in range(1, len(segments)):
+        t = shots[k]['transition']
+        lab = '[v%d]' % k
+        if t['type'] == 'cut':
+            parts.append('%s[%d:v]concat=n=2:v=1:a=0%s' % (cur, k, lab))
+            total += durs[k]
+        else:
+            dd = max(0.05, min(t['dur'], durs[k - 1] * 0.5, durs[k] * 0.5))
+            name = 'fadeblack' if t['type'] == 'dip' else 'fade'
+            off = max(0.0, total - dd)
+            parts.append('%s[%d:v]xfade=transition=%s:duration=%.4f:offset=%.4f%s'
+                         % (cur, k, name, dd, off, lab))
+            total += durs[k] - dd
+            progress('    转场 %s → %s：%s %.2fs'
+                     % (segments[k - 1][0]['id'], segments[k][0]['id'],
+                        t['type'], dd))
+        cur = lab
+
+    title = plan.get('title') or DEFAULTS['title']
+    safe = ''.join('_' if ch in '\\/:*?"<>|' else ch for ch in str(title))
+    n_total = max(1, int(round(total * fps)))
+    mp4 = os.path.join(out_dir, '%s_%s秒_%s.mp4'
+                       % (safe, _label_secs(n_total, fps), res))
+    cmd = [ffmpeg, '-y']
+    for p in inputs:
+        cmd += ['-i', p]
+    cmd += ['-filter_complex', ';'.join(parts), '-map', cur,
+            '-c:v', 'libx264', '-crf', crf, '-pix_fmt', 'yuv420p',
+            '-movflags', '+faststart', mp4]
+    rc, out = pipeline.run(cmd, log=os.path.join(out_dir, '_ffmpeg.log'))
+    if rc != 0:
+        raise RuntimeError('ffmpeg 带转场合成失败\n%s' % out[-1500:])
+    progress('成片：%s（%.1f MB）' % (mp4, os.path.getsize(mp4) / 1e6))
+    return mp4, n_total
 
 
 def film(blender_exe, plan, out_dir, animatic=False, progress=print):
@@ -228,6 +322,12 @@ def film(blender_exe, plan, out_dir, animatic=False, progress=print):
     for i, s in enumerate(shots, 1):
         preset = s['preset']
         script_name, blend_name, is_recipe = _preset_info(preset)
+        # ★ 这一镜如果有自己的 blend，就用它（换场景），否则用分镜表的总工程
+        shot_blend = _resolve(s['blend'], base) if s.get('blend') else blend_src
+        if not shot_blend or not os.path.exists(shot_blend):
+            raise ValueError('镜头 %s 的 blend 找不到: %r' % (s['id'], s.get('blend')))
+        if shot_blend != blend_src:
+            progress('  %s 换工程：%s' % (s['id'], os.path.basename(shot_blend)))
         env = os.environ.copy()
         env.update(s['env'])
         key_r, key_s = PRESET_ENV_RES.get(preset, ('', ''))
@@ -239,7 +339,7 @@ def film(blender_exe, plan, out_dir, animatic=False, progress=print):
         if key_s:
             env[key_s] = str(samples)
         watch = set(s['env']) | {key_r, key_s, 'DSH_ANIM_RECIPE'}
-        sig = (preset, tuple(sorted((k, env.get(k)) for k in watch if k)))
+        sig = (preset, shot_blend, tuple(sorted((k, env.get(k)) for k in watch if k)))
         d = os.path.join(work, '%02d_%s' % (i, s['id']))
         os.makedirs(d, exist_ok=True)
 
@@ -248,7 +348,7 @@ def film(blender_exe, plan, out_dir, animatic=False, progress=print):
             progress('  %s 复用工程 %s' % (s['id'], os.path.basename(os.path.dirname(ablend))))
         else:
             script = os.path.join(pipeline.BLENDER_DIR, script_name)
-            cmd = [blender_exe, '-b', *pipeline.gpu_args(), blend_src, '--python', script, '--',
+            cmd = [blender_exe, '-b', *pipeline.gpu_args(), shot_blend, '--python', script, '--',
                    d, str(total), str(int(fps)), '']
             if is_recipe:
                 cmd.append(preset)
@@ -282,7 +382,12 @@ def film(blender_exe, plan, out_dir, animatic=False, progress=print):
 
         f0, f1 = s['range']
         progress('  %s 渲染 %d-%d …' % (s['id'], f0, f1))
+        # ⚠️ 必须显式给 -o：复用工程时 ablend 是【上一个镜头】建的那份，
+        #    它内部存的输出路径指向上一个镜头的目录，不给 -o 帧会渲到别人家里去
+        #    （实测 S03 复用 S01 的工程 → S03 目录 0 帧，S01 目录 48 帧）。
         rc, out = pipeline.run([blender_exe, '-b', *pipeline.gpu_args(), ablend,
+                                '-o', os.path.join(d, 'frame_####'),
+                                '-F', 'PNG',
                                 '-s', str(f0), '-e', str(f1), '-a'],
                                log=os.path.join(d, '_render.log'))
         frames = sorted(f for f in os.listdir(d)
@@ -295,29 +400,36 @@ def film(blender_exe, plan, out_dir, animatic=False, progress=print):
         segments.append((s, d, frames))
         progress('    %s 完成 %d 帧' % (s['id'], len(frames)))
 
-    # —— 重编号：成片要连续的 seq_0001.png ……
-    idx = 1
-    for s, d, frames in segments:
-        for name in frames:
-            dst = os.path.join(seq, 'seq_%04d.png' % idx)
-            shutil.copyfile(os.path.join(d, name), dst)
-            idx += 1
-    n_total = idx - 1
-    progress('分段拼好：%d 帧 / %.2f 秒' % (n_total, n_total / fps))
+    has_trans = any(sh['transition']['type'] != 'cut' for sh in shots[1:])
+    crf = str(int(plan.get('crf', DEFAULTS['crf'])))
+    ffmpeg = _ffmpeg()
+    if has_trans and ffmpeg:
+        mp4, n_total = _stitch_with_transitions(
+            ffmpeg, segments, shots, out_dir, plan, fps, res, crf, progress)
+        progress('分段拼好（含转场）：%d 帧 / %.2f 秒' % (n_total, n_total / fps))
+    else:
+        # —— 重编号：成片要连续的 seq_0001.png ……
+        idx = 1
+        for s, d, frames in segments:
+            for name in frames:
+                dst = os.path.join(seq, 'seq_%04d.png' % idx)
+                shutil.copyfile(os.path.join(d, name), dst)
+                idx += 1
+        n_total = idx - 1
+        progress('分段拼好：%d 帧 / %.2f 秒' % (n_total, n_total / fps))
 
     title = plan.get('title') or DEFAULTS['title']
     safe = ''.join('_' if ch in '\\/:*?"<>|' else ch for ch in str(title))
-    mp4 = os.path.join(out_dir, '%s_%s秒_%s.mp4'
-                       % (safe, _label_secs(n_total, fps), res))
-    crf = str(int(plan.get('crf', DEFAULTS['crf'])))
-    ffmpeg = _ffmpeg()
+    if not has_trans:
+        mp4 = os.path.join(out_dir, '%s_%s秒_%s.mp4'
+                           % (safe, _label_secs(n_total, fps), res))
     if not ffmpeg:
         progress('⚠️ 没找到 ffmpeg，帧序列留在 %s，可自行转换：\n'
                  '   ffmpeg -framerate %g -i "%s/seq_%%04d.png" -c:v libx264 '
                  '-crf %s -pix_fmt yuv420p -movflags +faststart "%s"'
                  % (seq, fps, seq, crf, mp4))
         mp4 = None
-    else:
+    elif not has_trans:
         rc, out = pipeline.run([ffmpeg, '-y', '-framerate', '%g' % fps,
                                 '-i', os.path.join(seq, 'seq_%04d.png'),
                                 '-c:v', 'libx264', '-crf', crf,
@@ -334,11 +446,15 @@ def film(blender_exe, plan, out_dir, animatic=False, progress=print):
         f.write('- %s @ %g fps，共 %d 帧 / %.2f 秒\n' % (res, fps, n_total, n_total / fps))
         f.write('- 封面工程：`%s`\n' % blend_src)
         f.write('- 渲染：%d samples，H.264 crf %s\n\n' % (samples, crf))
-        f.write('| 镜号 | 景别 | 机位 / 运动 | 帧区间 | 时长 | 画面内容 |\n')
-        f.write('|---|---|---|---|---|---|\n')
+        f.write('| 镜号 | 景别 | 机位 / 运动 | 转场 | 帧区间 | 时长 | 画面内容 |\n')
+        f.write('|---|---|---|---|---|---|---|\n')
         for s in shots:
-            f.write('| %s | %s | %s | %d–%d | %.2fs | %s |\n'
+            tr = s.get('transition') or {}
+            tr_txt = '—' if tr.get('type', 'cut') == 'cut' else '%s %.2fs' % (
+                tr.get('type'), tr.get('dur') or 0)
+            f.write('| %s | %s | %s | %s | %d–%d | %.2fs | %s |\n'
                     % (s['id'], s.get('shot_size') or '—', s.get('camera') or '—',
+                       tr_txt,
                        s['range'][0], s['range'][1], s['frames'] / fps,
                        s.get('note') or '—'))
         f.write('\n每个镜头的参数覆盖（env）：\n\n')
