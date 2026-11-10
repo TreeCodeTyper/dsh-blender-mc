@@ -1093,10 +1093,14 @@ POSES = {
         'Top Arm.L': (16.0, 0.0, -34.0),
         'Bottom Arm.L': (-24.0, 0.0, 0.0),
         'Hand.L': (0.0, 0.0, -10.0),
-        'Top Leg.R': (6.0, 0.0, 0.0),
-        'Bottom Leg.R': (-5.0, 0.0, 0.0),
-        'Top Leg.L': (-6.0, 0.0, 0.0),
-        'Bottom Leg.L': (4.0, 0.0, 0.0),
+        # ★ 双腿岔开（v0.6.1 用户要求「看得出来是两条腿」）：
+        #   前腿迈出去 30°、后腿回收 16°、双腿各向外 12°，脚也带一点内旋。
+        #   实测（_scratch/修仙封面/legs3）：纯站姿时两条腿的面完全重合，
+        #   在 1080p 下只看得出一根柱子；这样错开之后轮廓上才分出两段。
+        'Top Leg.R': (36.0, 0.0, 12.0),
+        'Bottom Leg.R': (5.5, 0.0, 4.8),
+        'Top Leg.L': (-22.0, 0.0, -12.0),
+        'Bottom Leg.L': (-1.6, 0.0, -4.8),
     },
     # 举剑英雄姿：躯干朝镜头拧 12°、头再补 8° 看向镜头，
     # 右臂抬到肩高外张 34°（剑在头外侧，不糊脸），左臂往后收做配平。
@@ -1247,6 +1251,31 @@ def pose_right_arm():
         pb.rotation_mode = 'XYZ'
         pb.rotation_euler = tuple(math.radians(v) for v in rot)
         done.append(f"{bone}{rot}")
+    # ★ 站姿「双腿岔开」（v0.6.1，用户原话「稍微岔开点点，看得出来是两条腿」）：
+    #   FK 只能绕 X（前后）摆，Y/Z 实测是沿骨长扭转 —— 三个轴都试过，
+    #   侧向岔开在 FK 上根本做不出来（_scratch/修仙封面/legs4|legs5）。
+    #   所以走 IK：切到 IK、把两只脚的目标点往外挪 STANCE_X、再一前一后错开。
+    stance_on = (os.environ.get('DSH_STANCE', '1').lower()
+                 not in ('0', 'off', 'false', 'no'))
+    if stance_on and name in ('action', 'hero', 'raise', 'guard', 'snapshot'):
+        try:
+            _sx = float(os.environ.get('DSH_STANCE_X', '0.15'))
+            _sf = float(os.environ.get('DSH_STANCE_FWD', '0.10'))
+            for side in ('R', 'L'):
+                arm.pose.bones[f'Top Leg.{side}']['FK <-> IK'] = 1.0
+            bpy.context.view_layer.update()
+            _b3 = arm.matrix_world.to_3x3()
+            for side, sx, sy in (('R', -_sx, -_sf), ('L', +_sx, +_sf * 0.6)):
+                pb = arm.pose.bones.get(f'Leg IK.{side}')
+                if pb is None:
+                    continue
+                m = pb.matrix.copy()
+                m.translation = m.translation + (_b3 @ mathutils.Vector((sx, sy, 0.0)))
+                pb.matrix = m
+            bpy.context.view_layer.update()
+            p(f"    双腿岔开：脚目标左右 ±{_sx:g} 格，前后 {_sf:g} 格（IK）")
+        except Exception as e:
+            p(f"    ⚠️ 站姿岔腿失败（{type(e).__name__}: {e}），保持原样")
     if name == 'sit':
         # AI 控制层：腿走 IK，骨盆下沉，脚目标落在地面；等价于人在姿态模式里
         # 把「FK <-> IK」设为 1、拖骨盆和脚上的方形控制器。
