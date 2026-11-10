@@ -961,6 +961,27 @@ def shoot(save, area, out_root, blender=None, params=None, center=None,
               'attempts': history}
     with open(os.path.join(out_root, '结果.json'), 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
+    # ★ P0-3：把这一趟落成档案（以前这些只活在返回值里，关了窗口就没了）
+    try:
+        import runs as _runs
+        _p, _rec = _runs.write(
+            'shoot',
+            goal=str(p.get('goal') or ''),
+            inputs={'save': save, 'area': area, 'center': center,
+                    'radius': radius, 'out': out_root},
+            params=final['params'],
+            artifacts=[final['png'], final['blend']],
+            verdict=final.get('verdict'), score=final.get('score'),
+            next_action=('' if (final.get('score') or 0) >= 85
+                         else '审图未过 85：' + '；'.join(final.get('issues') or [])),
+            replay={'kind': 'shoot', 'save': save, 'area': area,
+                    'out': out_root, 'center': center, 'radius': radius,
+                    'params': final['params']},
+        )
+        result['run'] = _p
+        progress(f'    🗂  档案 {os.path.basename(_p)}')
+    except Exception as e:
+        progress(f'    ⚠️ 档案没写成（{type(e).__name__}: {e}）')
     return result
 
 
@@ -1036,11 +1057,41 @@ def animate(blender_exe, blend, out_dir, total=240, fps=24, kind='aura',
         raise RuntimeError(f'动画脚本没有生成工程{hint}，多半是脚本自己抛异常了\n'
                            f'{out[-2000:]}')
     if preview:
-        return {'blend': ablend, 'frames': None, 'preview': True}
+        res = {'blend': ablend, 'frames': None, 'preview': True}
+        _archive_anim(kind, blend, out_dir, total, fps, res, preview=True,
+                      progress=progress)
+        return res
     rc, out = run([blender_exe, '-b', *gpu_args(), ablend, '-a'],
                   log=os.path.join(out_dir, '_render.log'))
     n = len([f for f in os.listdir(out_dir) if f.startswith('frame_')])
     if n == 0:
         raise RuntimeError(f'动画渲染没出帧\n{out[-2000:]}')
     progress(f'    渲染 {n} 帧')
-    return {'blend': ablend, 'frames': n, 'dir': out_dir, 'fps': fps}
+    res = {'blend': ablend, 'frames': n, 'dir': out_dir, 'fps': fps}
+    _archive_anim(kind, blend, out_dir, total, fps, res, preview=False,
+                  progress=progress)
+    return res
+
+
+def _archive_anim(kind, blend, out_dir, total, fps, res, preview=False,
+                  progress=print):
+    """动画也落一份档案（失败不影响主流程）。"""
+    try:
+        import runs as _runs
+        _p, _ = _runs.write(
+            'anim',
+            goal=str(os.environ.get('DSH_GOAL') or ''),
+            inputs={'blend': blend, 'preset': kind, 'frames': total, 'fps': fps,
+                    'preview': bool(preview)},
+            params={'preset': kind, 'frames': total, 'fps': fps},
+            artifacts=[res.get('dir')] if res.get('dir') else [],
+            verdict=None, score=None,
+            next_action=('只出了预览帧，要出片就去掉 --preview 再跑'
+                         if preview else ''),
+            replay={'kind': 'anim', 'blend': blend, 'out': out_dir,
+                    'preset': kind, 'frames': total, 'fps': fps,
+                    'preview': bool(preview)},
+        )
+        progress(f'    🗂  档案 {os.path.basename(_p)}')
+    except Exception as e:
+        progress(f'    ⚠️ 档案没写成（{type(e).__name__}: {e}）')

@@ -372,6 +372,8 @@ def cmd_shoot(a):
         params['backdrop'] = a.backdrop
     if getattr(a, 'rim_scale', None) is not None:
         params['rim_scale'] = a.rim_scale
+    if getattr(a, 'goal', None):
+        params['goal'] = a.goal
     # ── v0.5.0 新参数：只把「用户真给了」的塞进去 ─────────────────────
     #    item 的空字符串是合法值（= 空手），所以按 is not None 判断；
     #    pipeline.step_render 也按 is not None 决定要不要设 env，
@@ -708,6 +710,69 @@ def _default_blender():
         return None
 
 
+def cmd_runs(a):
+    """任务档案：list / show / replay / dir。
+
+    replay 的意义：以前想复现某张封面，只能翻聊天记录找当时敲的参数；
+    现在 `runs replay <id>` 直接拿档案里存的 kwargs 再跑一遍。
+    """
+    import runs
+    act = a.action
+    if act == 'dir':
+        print(runs.runs_dir())
+        return 0
+    if act == 'list':
+        rows = runs.listing(limit=a.limit)
+        if not rows:
+            print('（还没有档案）')
+            return 0
+        print(f'{"id":28} {"分数":>4}  {"结论":6} 目标')
+        for r in rows:
+            sc = r.get('score')
+            print(f'{r["id"]:28} {("" if sc is None else sc):>4}  '
+                  f'{str(r.get("verdict") or "-")[:10]:10} '
+                  f'{(r.get("goal") or "")[:40]}')
+        print(f'\n档案目录：{runs.runs_dir()}')
+        return 0
+    rid = a.rid
+    if not rid:
+        print('❌ 要给档案 id（先 runs list 看）')
+        return 1
+    rec = runs.load(rid)
+    if act == 'show':
+        print(json.dumps(rec, ensure_ascii=False, indent=2))
+        return 0
+    # ---- replay ----
+    rp = rec.get('replay') or {}
+    kind = rp.get('kind') or rec.get('kind')
+    print(f'重放 {rec["id"]}（{kind}）')
+    if kind == 'shoot':
+        from pipeline import shoot
+        out = rp.get('out') or os.path.join(os.getcwd(), 'replay')
+        return 0 if shoot(rp['save'], rp.get('area'), out,
+                          blender=a.blender, params=rp.get('params'),
+                          center=rp.get('center'), radius=rp.get('radius'),
+                          progress=print) else 1
+    if kind == 'anim':
+        from pipeline import animate, find_blender
+        b = find_blender(a.blender)
+        animate(b, rp['blend'], rp.get('out'), total=int(rp.get('frames') or 240),
+                fps=float(rp.get('fps') or 24), kind=rp.get('preset') or 'aura',
+                preview=None if not rp.get('preview') else '1')
+        return 0
+    if kind == 'film':
+        import film as film_mod
+        from pipeline import find_blender
+        b = find_blender(a.blender)
+        plan = dict(rp.get('plan') or {})
+        plan['_dir'] = rp.get('plan_dir') or os.getcwd()
+        film_mod.film(b, plan, rp.get('out') or os.path.join(os.getcwd(), 'film'),
+                      animatic=bool(rp.get('animatic')))
+        return 0
+    print(f'❌ 不认识的档案类型：{kind}（这份档案可能来自更老的版本）')
+    return 1
+
+
 def cmd_map(a):
     """背景地图库：上传的存档 zip → 解压识别入库（逻辑全在 maplib.py）"""
     import maplib
@@ -837,6 +902,9 @@ def main():
                         'studio=中性灰地面（棚拍/抠图）')
     h.add_argument('--rim-scale', dest='rim_scale', type=float, default=None,
                    help='轮廓光倍率（单独加 Rim 灯，默认跟 light_scale 一致）')
+    h.add_argument('--goal', default=None,
+                   help='这一趟想干什么（写进任务档案，方便以后翻；例：'
+                        '「修仙封面 A 版，鸟居+三剑」）')
     h.add_argument('--skin', default=None,
                    help='人物皮肤：绝对路径，或皮肤库里的名字（<DSH_HOME>/blender-mc/skins/）')
     h.add_argument('--attempts', type=_posint, default=2,
@@ -962,6 +1030,13 @@ def main():
     mo.add_argument('--pos', default='0,0,0', help='spawn：摆放位置 x,y,z（默认 0,0,0）')
     mo.add_argument('--scale', default='1.0', help='spawn：缩放（默认 1.0）')
     mo.set_defaults(func=cmd_mobs)
+
+    rp = sub.add_parser('runs', help='任务档案：列出 / 查看 / 重放')
+    rp.add_argument('action', choices=['list', 'show', 'replay', 'dir'])
+    rp.add_argument('rid', nargs='?', default='', help='show/replay 的档案 id')
+    rp.add_argument('--limit', type=int, default=20, help='list 显示几条')
+    rp.add_argument('--blender', default=None, help='replay 用哪个 Blender')
+    rp.set_defaults(func=cmd_runs)
 
 
     a = ap.parse_args(_hoist_blender(sys.argv[1:]))

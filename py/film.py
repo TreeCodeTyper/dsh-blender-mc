@@ -353,7 +353,31 @@ def film(blender_exe, plan, out_dir, animatic=False, progress=print):
                    'res': res, 'mp4': mp4,
                    'finished_at': time.strftime('%Y-%m-%d %H:%M:%S')},
                   f, ensure_ascii=False, indent=2)
-    return {'mp4': mp4, 'frames': n_total, 'fps': fps, 'res': res,
-            'shots': shots, 'storyboard': md, 'dir': out_dir,
-            'seconds': round(n_total / fps, 2),
-            'elapsed': round(time.time() - t0, 1)}
+    res_dict = {'mp4': mp4, 'frames': n_total, 'fps': fps, 'res': res,
+                'shots': shots, 'storyboard': md, 'dir': out_dir,
+                'seconds': round(n_total / fps, 2),
+                'elapsed': round(time.time() - t0, 1)}
+    # ★ P0-3 档案：成片这一趟也留档（哪个分镜表、几个镜头、产物 mp4）
+    try:
+        import runs as _runs
+        _p, _ = _runs.write(
+            'film',
+            goal=str(plan.get('title') or ''),
+            inputs={'blend': blend_src, 'plan': plan.get('_dir') or '',
+                    'shots': len(shots), 'animatic': bool(animatic)},
+            params={'fps': fps, 'res': res, 'samples': samples,
+                    'total': total},
+            artifacts=[mp4, os.path.join(out_dir, '分镜表.json')],
+            verdict=None, score=None,
+            next_action=('这是低清 animatic，确认节奏后去掉 animatic 出正式版'
+                         if animatic else ''),
+            replay={'kind': 'film', 'plan': {k: v for k, v in plan.items()
+                                            if not k.startswith('_')},
+                    'plan_dir': base, 'out': out_dir,
+                    'animatic': bool(animatic)},
+        )
+        res_dict['run'] = _p
+        progress('    🗂  档案 %s' % os.path.basename(_p))
+    except Exception as e:
+        progress('    ⚠️ 档案没写成（%s: %s）' % (type(e).__name__, e))
+    return res_dict

@@ -22,13 +22,26 @@ import os
 import time
 
 ENV_DIR = 'DSH_RUNS_DIR'
+ENV_DIR_FALLBACK = 'DSH_RUNS_DIR_FALLBACK'
 
 
 def runs_dir():
+    """档案目录。默认 ~/.dsh/blender-mc/runs；写不进去就退到当前目录下的 .runs。
+
+    ⚠️ 实测：在 DSH 的 workspace-write 沙箱里，~/.dsh 是【不可写】的
+    （WinError 5）。插件正式跑时宿主进程能写，但工具单独跑会撞墙，
+    所以这里必须能退回一个可写目录，而不是直接把整个 shoot 搞挂。
+    """
     base = os.environ.get(ENV_DIR) or os.path.join(
         os.path.expanduser('~'), '.dsh', 'blender-mc', 'runs')
-    os.makedirs(base, exist_ok=True)
-    return base
+    try:
+        os.makedirs(base, exist_ok=True)
+        return base
+    except OSError:
+        fallback = os.environ.get(ENV_DIR_FALLBACK) or os.path.join(
+            os.getcwd(), '.runs')
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
 
 
 def _new_id(kind):
