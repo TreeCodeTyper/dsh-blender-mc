@@ -589,6 +589,18 @@ def cmd_anim(a):
     b = find_blender(a.blender)
     preset = getattr(a, 'preset', 'killaura')
     frames, fps = a.frames, a.fps
+    if frames is None:
+        # 配方自己声明了 duration 就照它来，否则退回 240（老预设的行为）
+        frames = 240
+        try:
+            import json as _json
+            from pipeline import BLENDER_DIR as _BD
+            _rp = os.path.join(_BD, 'presets', '%s.json' % preset)
+            if os.path.isfile(_rp):
+                with open(_rp, encoding='utf-8') as _f:
+                    frames = int(_json.load(_f).get('duration') or 240)
+        except Exception:
+            pass
     if getattr(a, 'prompt', None):
         from prompt_film import compile_anim
         spec = compile_anim(a.prompt, fps=fps)
@@ -952,7 +964,9 @@ def main():
     n = sub.add_parser('anim', help='出动画（10 秒杀戮光环）')
     n.add_argument('blend', help='封面工程 .blend')
     n.add_argument('--out', required=True)
-    n.add_argument('--frames', type=_posint, default=240)
+    n.add_argument('--frames', type=_posint, default=None,
+                   help='总帧数；不给就用配方自带的 duration（以前写死 240，'
+                        '会把 96 帧的配方拉长 2.5 倍，落地帧全错位）')
     n.add_argument('--fps', type=_posint, default=24)
     n.add_argument('--preview', default=None, help='只渲这些帧，如 1,60,120')
     n.add_argument('--preset', default='killaura',

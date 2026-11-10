@@ -405,7 +405,67 @@ def motion_ground(ctx, m):
             'speed': speed, 'dist': dist}
 
 
-MOTIONS = {'fly': motion_fly, 'ground': motion_ground, 'leap': motion_leap}
+def motion_drop(ctx, m):
+    """从高处落下来砸地 —— 「坠落 / 落地」这类片子的运动形状。
+
+    fly 只能往上飞、leap 是起跳再落回原处，两者都做不出「一开始就在半空」。
+    drop 把高度写成一条重力曲线：
+
+        h(f) = height · (1 − u^accel)        u = (f − start) / (land − start)
+        落地后：h = bounce · 衰减的正弦（不写 bounce 就一直贴地）
+
+    m 的键：
+        height  起始离地高度（格）
+        start   从第几帧开始下落（之前定在半空）
+        land    落地帧；land >= total 表示这支片子不落地（纯坠落）
+        accel   重力指数，1 = 匀加速，2 = 越落越快（更像真重力）
+        bounce  {amount, frames, cycle} 落地回弹
+    """
+    UP = mu.Vector((0.0, 0.0, 1.0))
+    az = math.radians(float(m.get('az', 0.0)))
+    FV = mu.Vector((math.cos(az), math.sin(az), 0.0))
+    base = ctx['base']
+    height = float(m.get('height', 8.0))
+    start = float(m.get('start', 1))
+    land = float(m.get('land', ctx['total']))
+    accel = max(1.0, float(m.get('accel', 2.0)))
+    bo = m.get('bounce') or {}
+    bo_a = float(bo.get('amount', 0.0))
+    bo_f = max(1.0, float(bo.get('frames', 14)))
+    bo_c = max(2.0, float(bo.get('cycle', 10)))
+    tilt_cfg = m.get('tilt') or {'scale': 0.0, 'terms': []}
+    bank_cfg = m.get('bank') or {'scale': 0.0, 'terms': []}
+
+    def h_at(f):
+        if f <= start:
+            return height
+        if f < land:
+            u = (f - start) / float(max(1e-6, land - start))
+            return height * (1.0 - min(1.0, u) ** accel)
+        if not bo_a:
+            return 0.0
+        # 落地后按 frames 的时长衰减回弹
+        d = float(f) - land
+        if d > bo_f:
+            return 0.0
+        return bo_a * math.sin(d / bo_c * math.pi) * max(0.0, 1.0 - d / bo_f)
+
+    def char_world(f):
+        return base + UP * h_at(f)
+
+    def tilt(f):
+        return float(tilt_cfg.get('scale', 0)) * _terms(f, tilt_cfg.get('terms') or [])
+
+    def bank(f):
+        return float(bank_cfg.get('scale', 0)) * _terms(f, bank_cfg.get('terms') or [])
+
+    return {'char_world': char_world, 'yaw': lambda f: ctx['base_rz'],
+            'tilt': tilt, 'bank': bank,
+            'FV': FV, 'UP': UP, 'axis': UP.cross(FV).normalized(), 'speed': 0.0}
+
+
+MOTIONS = {'fly': motion_fly, 'ground': motion_ground,
+           'leap': motion_leap, 'drop': motion_drop}
 
 
 # ── 坐骑 ───────────────────────────────────────────────────────────────
@@ -903,6 +963,58 @@ def build_camera(ctx, cam, mo, override=None):
             for f, v in cam['rise']]
     z_base = float(cam.get('z_base', 2.30)) + ov.get('z_add', 0.0)
     aim_h = float(cam.get('aim_h', 1.00))
+    # ★ 运镜 DSL（P1-3）：camera.moves 是一组「在基础轨道上叠加的运动」，
+    #   每项 {type, start, dur, amount, ease}，按 smoothstep 从 0 涨到 amount。
+    #   type：push_in / pull_out / orbit / crane_up / crane_down / rise /
+    #         aim / dutch（画面滚转）/ handheld（微抖）。
+    #   以前只能改 az/dist/lens 的起止值，也就是「一条斜线」；有了 moves 才写得出
+    #   「推进 + 慢慢绕半圈 + 手持微抖」这种镜头语言，而不用另写 Python。
+    moves = cam.get('moves') or []
+
+    def _ease(u, kind):
+        u = min(1.0, max(0.0, u))
+        if kind == 'linear':
+            return u
+        if kind == 'in':
+            return u * u
+        if kind == 'out':
+            return 1.0 - (1.0 - u) ** 2
+        if kind == 'hold':
+            return 1.0 if u > 0 else 0.0
+        return u * u * (3.0 - 2.0 * u)      # 默认 smoothstep（缓入缓出）
+
+    def move_sum(f):
+        d_mul, az_add, lens_mul = 1.0, 0.0, 1.0
+        z_add, rise_add, aim_add, roll = 0.0, 0.0, 0.0, 0.0
+        for mv in moves:
+            f0 = float(mv.get('start', 1))
+            dur = float(mv.get('dur', 0))
+            amt = float(mv.get('amount', 0.0))
+            u = _ease(1.0 if dur <= 0 and f >= f0 else (f - f0) / max(1e-6, dur),
+                      str(mv.get('ease', 'inout')))
+            t = str(mv.get('type', ''))
+            if t == 'push_in':
+                d_mul *= (1.0 - amt * u)
+            elif t in ('pull_out', 'dolly'):
+                d_mul *= (1.0 + amt * u)
+            elif t == 'orbit':
+                az_add += amt * u
+            elif t == 'crane_up':
+                z_add += amt * u
+            elif t == 'crane_down':
+                z_add -= amt * u
+            elif t == 'rise':
+                rise_add += amt * u
+            elif t == 'aim':
+                aim_add += amt * u
+            elif t == 'dutch':
+                roll += amt * u
+            elif t == 'handheld':
+                roll += amt * math.sin(f * 0.61) * 0.6
+                z_add += amt * 0.35 * math.sin(f * 0.93)
+                az_add += amt * 0.5 * math.sin(f * 0.37)
+        return d_mul, az_add, lens_mul, z_add, rise_add, aim_add, roll
+
     step = int(cam.get('key_step', 2))
     dof_f = float(cam.get('dof', 2.4) or 0.0)
     az0, az1 = cam['az'][0][1], cam['az'][-1][1]
@@ -916,17 +1028,22 @@ def build_camera(ctx, cam, mo, override=None):
     base_z = mo['char_world'](1).z
     for f in range(1, ctx['total'] + 1, step):
         c = mo['char_world'](f)
-        a = math.radians(track(az, f))
-        d = track(dist, f)
-        zc = base_z + z_base + (c.z - base_z) * track(rise, f)
+        _d_mul, _az_add, _lens_mul, _z_add, _rise_add, _aim_add, _roll = move_sum(f)
+        a = math.radians(track(az, f) + _az_add)
+        d = max(0.6, track(dist, f) * _d_mul)
+        _rise = min(1.0, max(0.0, track(rise, f) + _rise_add))
+        zc = base_z + z_base + _z_add + (c.z - base_z) * _rise
         pos = mu.Vector((c.x + math.cos(a) * d, c.y + math.sin(a) * d, zc))
-        aim = c + UP * aim_h
+        aim = c + UP * (aim_h + _aim_add)
         sc.frame_set(f)
         CAM.location = pos
         # 封面工程里相机可能是 QUATERNION 模式，写 euler 会被忽略、画面保持原朝向（歪的）
         CAM.rotation_mode = 'XYZ'
-        CAM.rotation_euler = (aim - pos).to_track_quat('-Z', 'Y').to_euler()
-        CAM.data.lens = track(lens, f)
+        _q = (aim - pos).to_track_quat('-Z', 'Y')
+        if _roll:
+            _q = _q @ mu.Quaternion((0.0, 0.0, 1.0), math.radians(_roll))
+        CAM.rotation_euler = _q.to_euler()
+        CAM.data.lens = track(lens, f) * _lens_mul
         CAM.keyframe_insert('location', frame=f)
         CAM.keyframe_insert('rotation_euler', frame=f)
         CAM.data.keyframe_insert('lens', frame=f)
@@ -940,6 +1057,10 @@ def build_camera(ctx, cam, mo, override=None):
                 CAM.data.dof.keyframe_insert('focus_distance', frame=f)
             except Exception:
                 pass
+    if moves:
+        p('    运镜 %d 段：%s' % (len(moves), '、'.join(
+            '%s @%d+%d帧 %+.2f' % (m.get('type'), m.get('start', 1), m.get('dur', 0),
+                                  float(m.get('amount', 0))) for m in moves)))
     p('    视线 %.0f°→%.0f°、距离 %.1f→%.1f、焦距 %.0f→%.0fmm'
       % (az0, az1, cam['dist'][0][1], cam['dist'][-1][1],
          cam['lens'][0][1], cam['lens'][-1][1]))
