@@ -248,7 +248,7 @@ def film(blender_exe, plan, out_dir, animatic=False, progress=print):
             progress('  %s 复用工程 %s' % (s['id'], os.path.basename(os.path.dirname(ablend))))
         else:
             script = os.path.join(pipeline.BLENDER_DIR, script_name)
-            cmd = [blender_exe, '-b', blend_src, '--python', script, '--',
+            cmd = [blender_exe, '-b', *pipeline.gpu_args(), blend_src, '--python', script, '--',
                    d, str(total), str(int(fps)), '']
             if is_recipe:
                 cmd.append(preset)
@@ -270,7 +270,7 @@ def film(blender_exe, plan, out_dir, animatic=False, progress=print):
                 json.dump(cam_path, f, ensure_ascii=False, indent=2)
             script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                   'apply_camera_path.py')
-            rc, out = pipeline.run([blender_exe, '-b', path_blend,
+            rc, out = pipeline.run([blender_exe, '-b', *pipeline.gpu_args(), path_blend,
                                     '--python', script, '--',
                                     path_json, path_blend, str(total)],
                                    log=os.path.join(d, '_camera_path.log'))
@@ -282,7 +282,7 @@ def film(blender_exe, plan, out_dir, animatic=False, progress=print):
 
         f0, f1 = s['range']
         progress('  %s 渲染 %d-%d …' % (s['id'], f0, f1))
-        rc, out = pipeline.run([blender_exe, '-b', ablend,
+        rc, out = pipeline.run([blender_exe, '-b', *pipeline.gpu_args(), ablend,
                                 '-s', str(f0), '-e', str(f1), '-a'],
                                log=os.path.join(d, '_render.log'))
         frames = sorted(f for f in os.listdir(d)

@@ -25,6 +25,7 @@ import json
 import math
 import os
 import sys
+import time
 
 import addon_utils
 import bpy
@@ -98,7 +99,9 @@ SKIN = os.environ.get("DSH_SKIN", "").strip()
 # ★ 输出分辨率：竖版封面用 1080x1920 之类
 RES_X = int(os.environ.get("DSH_RES_X", "1280"))
 RES_Y = int(os.environ.get("DSH_RES_Y", "720"))
-SAMPLES = int(os.environ.get("DSH_SAMPLES", "256"))   # EEVEE 采样数
+SAMPLES = int(os.environ.get("DSH_SAMPLES", "48"))   # EEVEE 采样数（P0-1：256→48，1080p 单张 52s→约 15s）
+# ★ P0-1：体积雾采样。原来写死 96，是渲染耗时的大头；雾本身是柔的，32 足够。
+VOL_SAMPLES = int(os.environ.get("DSH_VOL_SAMPLES", "32"))
 
 # ★ 光照/氛围（工作区副本新增）——做"黄昏逆光"这类氛围片用
 #   数值口径见 _scratch/render-opt/优化方案.md §6「参数总表」（AgX+Punchy 下标定）
@@ -536,6 +539,124 @@ else:
     GROUND = wmn.z
 p(f"    世界 xy 中心 ({WX:.1f}, {WY:.1f})")
 p(f"    射线向下探测地面: 命中 {len(_hits)}/81 条 → 地面 z={GROUND:.2f}")
+
+
+# ============================================================
+# ★ P0-2 干净包：backdrop = world / clean / studio
+#   world  : 导出什么就渲什么（默认，行为与以前完全一致）
+#   clean  : 隐藏导出的整块地形，换一块「1 格一贴」的草地平面 + 原有的雾。
+#            半径处被切出来的平顶土墙、圈进来的建筑残骸、树冠、悬空碎块
+#            全部消失 —— 这些是「背景里有其他方块」的真正来源。
+#   studio : 同 clean，但地面换成中性灰、不用贴图（纯棚拍/抠图素材用）。
+#   实测（修仙封面 hero.blend）：hide 掉 `世界` 后画面立刻干净；草地用
+#   grass_block_top.png 按 1 格 = 1 UV 平铺即可还原原版质感。
+# ============================================================
+BACKDROP = (os.environ.get('DSH_BACKDROP') or 'world').strip().lower()
+if BACKDROP in ('clean', 'studio', 'plane', 'none'):
+
+    def _find_image(part):
+        part = part.lower()
+        for im in bpy.data.images:
+            if part in (im.filepath or '').lower() or part in (im.name or '').lower():
+                return im
+        return None
+
+    def _make_ground_plane(cz, cx, cy, size, textured):
+        _me = bpy.data.meshes.new('Backdrop')
+        _ob = bpy.data.objects.new('Backdrop', _me)
+        bpy.context.scene.collection.objects.link(_ob)
+        _s = float(size) / 2.0
+        _me.from_pydata([(cx - _s, cy - _s, cz), (cx + _s, cy - _s, cz),
+                         (cx + _s, cy + _s, cz), (cx - _s, cy + _s, cz)],
+                        [], [(0, 1, 2, 3)])
+        _me.update()
+        _uv = _me.uv_layers.new(name='UVMap')
+        _uvs = [(0.0, 0.0), (float(size), 0.0),
+                (float(size), float(size)), (0.0, float(size))]
+        for _i, _lp in enumerate(_me.loops):
+            _uv.data[_i].uv = _uvs[_lp.vertex_index]
+        # ★ 优先直接复用导出地形里那块草地材质（MCprep 已经把群系 tint
+        #   算进节点里了），比手搓「灰度贴图 × 绿色」准得多。
+        _reuse = None
+        if textured:
+            for _o in wmesh:
+                for _sl in (getattr(_o, 'material_slots', None) or []):
+                    _m = _sl.material
+                    if _m is None or not _m.use_nodes:
+                        continue
+                    _hit = 'grass_block_top' in _m.name.lower()
+                    if not _hit:
+                        try:
+                            _hit = any(
+                                (getattr(_n, 'image', None) is not None and
+                                 'grass_block_top' in _n.image.name.lower())
+                                for _n in _m.node_tree.nodes)
+                        except Exception:
+                            _hit = False
+                    if _hit:
+                        _reuse = _m
+                        break
+                if _reuse is not None:
+                    break
+        if _reuse is not None:
+            _mat = _reuse.copy()
+            _mat.name = 'Backdrop_grass'
+            _me.materials.append(_mat)
+            p(f"    地面复用导出地形里的草地材质「{_reuse.name}」")
+            return _ob
+        _mat = bpy.data.materials.new('Backdrop')
+        _mat.use_nodes = True
+        _nt = _mat.node_tree
+        _nt.nodes.clear()
+        _out = _nt.nodes.new('ShaderNodeOutputMaterial')
+        _bsdf = _nt.nodes.new('ShaderNodeBsdfPrincipled')
+        _bsdf.inputs['Roughness'].default_value = 0.92
+        _img = _find_image('grass_block_top') if textured else None
+        if _img is not None:
+            _tex = _nt.nodes.new('ShaderNodeTexImage')
+            _tex.image = _img
+            _tex.interpolation = 'Closest'      # 方块边缘要锐，不能插值糊掉
+            _tex.extension = 'REPEAT'
+            # ⚠️ Minecraft 的 grass_block_top.png 本身是【灰度】的，游戏里
+            #   颜色来自群系 tint；直接贴上去是一片灰蓝（实测踩到）。
+            #   这里用乘法节点乘一个群系绿，把原版草原的颜色还原回来。
+            _col = _tex.outputs['Color']
+            try:
+                _mix = _nt.nodes.new('ShaderNodeMixRGB')
+                _mix.blend_type = 'MULTIPLY'
+                _mix.inputs['Fac'].default_value = 1.0
+                _nt.links.new(_tex.outputs['Color'], _mix.inputs['Color1'])
+                _mix.inputs['Color2'].default_value = (0.42, 0.70, 0.28, 1.0)
+                _col = _mix.outputs['Color']
+            except Exception as _e:
+                p(f"    ⚠️ 草地配色节点没建起来（{_e}），用灰度贴图")
+            _nt.links.new(_col, _bsdf.inputs['Base Color'])
+        else:
+            _bsdf.inputs['Base Color'].default_value = ((0.30, 0.36, 0.24, 1.0)
+                                                        if textured else
+                                                        (0.42, 0.42, 0.42, 1.0))
+        _nt.links.new(_bsdf.outputs['BSDF'], _out.inputs['Surface'])
+        _me.materials.append(_mat)
+        return _ob
+
+    _n_hid = 0
+    for _o in list(wmesh):
+        try:
+            _o.hide_render = True
+            _n_hid += 1
+        except Exception:
+            pass
+    _plane = _make_ground_plane(GROUND, WX, WY, 600.0,
+                               textured=(BACKDROP != 'studio'))
+    # ★ 干净档要把雾压下去：平整大平面上按原倍率挂雾会糊成一片奶白
+    #   （实测 600x600 平地 + FOG_MULT 1.0 → 整块地面发灰、审图报「画面发灰」）。
+    FOG_MULT = FOG_MULT * 0.35
+    p(f"    背景档位 {BACKDROP}: 隐藏导出地形 {_n_hid} 个网格，"
+      f"补一块 {'草地贴图' if BACKDROP != 'studio' else '中性灰'}地面"
+      f"（600x600 格，z={GROUND:.2f}），雾倍率 ×0.35（平地挂浓雾会糊成奶白）")
+else:
+    p("    背景档位 world: 直接用导出的地形（想干净用 backdrop=clean）")
+
 
 # ============================================================
 # ---- 视线方位自动选择：先看"朝哪看有天空"（sky-first）----
@@ -3285,7 +3406,7 @@ else:
 # ★ P1-1 体积参数（tile_size 是字符串枚举：'2','4','8','16'）
 if fog_ok:
     for attr, val in (('volumetric_start', 0.4), ('volumetric_end', 200.0),
-                      ('volumetric_samples', 96),
+                      ('volumetric_samples', VOL_SAMPLES),
                       ('volumetric_sample_distribution', 0.85),
                       ('volumetric_light_clamp', 0.0),
                       ('use_volumetric_shadows', True),
@@ -3416,6 +3537,90 @@ try:
                    'notes': _subject_notes}, f, ensure_ascii=False, indent=2)
 except Exception as e:
     p(f"    ⚠️ 写 _subject_box.json 失败: {e}")
+
+# ★★★ P0-1 v2 同进程多阶段渲染 ★★★
+#   实测（_scratch/speedtest_p01，EEVEE/OpenGL）：同一 .blend 一个进程里
+#     第 1 张 960x540/16 = 42.2s
+#     第 2 张 960x540/16 =  1.3s
+#     第 3 张 1920x1080/48 = 5.2s
+#   即：~40s 是【每个 Blender 进程一次性】的着色器编译 / GPU 上下文开销，
+#   跟分辨率、采样数几乎无关（samples 16 与 1 都是 41s；空场景一个立方体也要 17s）。
+#   所以省时间的办法不是降采样，而是【少起进程】：建场景 + 试渲 + 定稿全在
+#   这一个进程里做完，别再把 .blend 存下来换个进程重载。
+def _emit_box_json(directory, rx, ry):
+    """按指定分辨率重新投影主体框，写到 directory/_subject_box.json。
+
+    试渲档和定稿档分辨率不同，审图框必须按各自的像素尺寸算，
+    否则 960x540 的图会拿到 1920x1080 的框（越界 → 审图全错）。
+    """
+    global RES_X, RES_Y
+    old = (RES_X, RES_Y)
+    RES_X, RES_Y = int(rx), int(ry)
+    try:
+        if body:
+            box, raw, notes = project_subject_box()
+        else:
+            box, raw, notes = None, None, ['没有身体网格（空镜）→ 不投影主体框']
+        if _head is not None:
+            hb, hnotes = project_object_box(_head, inset=0.06)
+        else:
+            hb, hnotes = None, ['没有 head 网格']
+    finally:
+        RES_X, RES_Y = old
+    try:
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, '_subject_box.json'), 'w', encoding='utf-8') as f:
+            json.dump({'subject_box': box, 'raw': raw, 'head_box': hb,
+                       'head_notes': hnotes, 'size': [int(rx), int(ry)],
+                       'source': 'world_to_camera_view(body eval_bbox)',
+                       'notes': notes}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        p(f"    ⚠️ 写 _subject_box.json 失败: {e}")
+
+
+_stages = []
+_raw = os.environ.get('DSH_STAGES', '').strip()
+if _raw:
+    try:
+        _stages = json.loads(_raw)
+        if not isinstance(_stages, list):
+            _stages = []
+    except Exception as e:
+        p(f"    ⚠️ DSH_STAGES 解析失败: {e}")
+_render_times = []
+for _si, _st in enumerate(_stages, 1):
+    _p = _st.get('path')
+    if not _p:
+        continue
+    _rx, _ry = (_st.get('res') or [RES_X, RES_Y])[:2]
+    _ss = int(_st.get('samples') or SAMPLES)
+    _tag = _st.get('tag') or f'stage{_si}'
+    try:
+        os.makedirs(os.path.dirname(_p) or '.', exist_ok=True)
+    except Exception:
+        pass
+    scn.render.resolution_x, scn.render.resolution_y = int(_rx), int(_ry)
+    scn.eevee.taa_render_samples = _ss
+    scn.render.filepath = _p
+    _t = time.time()
+    bpy.ops.render.render(write_still=True)
+    _dt = round(time.time() - _t, 2)
+    _render_times.append({'tag': _tag, 'res': f'{int(_rx)}x{int(_ry)}',
+                          'samples': _ss, 'seconds': _dt, 'png': _p})
+    p(f"    [{_tag}] {int(_rx)}x{int(_ry)} / {_ss} 采样 → {_dt}s")
+    _emit_box_json(os.path.dirname(_p), _rx, _ry)
+if _render_times:
+    p(f"    同进程渲染 {len(_render_times)} 张，共 "
+      f"{round(sum(r['seconds'] for r in _render_times), 1)}s")
+    try:
+        with open(os.path.join(OUT, '_render_stages.json'), 'w', encoding='utf-8') as f:
+            json.dump(_render_times, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    # 渲染完把工程档恢复成正式设定（.blend 打开就是定稿档）
+    scn.render.resolution_x, scn.render.resolution_y = RES_X, RES_Y
+    scn.eevee.taa_render_samples = SAMPLES
+    scn.render.filepath = os.path.join(OUT, "封面_世界")
 
 blend = os.path.join(OUT, "封面_世界.blend")
 bpy.ops.wm.save_as_mainfile(filepath=blend)

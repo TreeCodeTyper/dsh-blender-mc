@@ -39,13 +39,64 @@ DEFAULTS = {
     # ★ 0.20 实测把天空顶到 sky_hot_ratio 0.79（整片死白），降到 0.12 才有暖色层次
     'sky_strength': 0.12,
     'light_scale': 1.0,    # 三点布光的整体倍率（会经 DSH_KEY_SCALE 真正传给 Blender）
+    # ★ P0-2 干净包：轮廓光单独可调。
+    #   原来 Rim 灯的倍率只能跟 KEY_SCALE 一起动，而审图反复报「主体边缘没有轮廓光
+    #   （rim_bright_frac 0.13）」—— 说明需要单独加，而不是整体加亮。
+    'rim_scale': 1.0,
+    # ★ P0-2 干净包：背景三档。
+    #   world（默认，导出什么就渲什么）/ clean（隐藏导出的整块地形，换成平铺草地 + 雾）
+    #   / studio（同 clean，但用中性灰地面，不依赖贴图 —— 适合纯棚拍）。
+    #   修仙封面那次实测：hide 掉 `世界` 后，半径处被切出来的「平顶土墙」和
+    #   圈进来的建筑残骸全部消失，画面立刻干净（草地质感用 grass_block_top 平铺补回）。
+    'backdrop': 'world',
     'cam_az': 200.0,       # 视线方位角（MC 角度）
     'dist': 15.0,          # ★ 配合 105mm：17 格 ≈ 主体占画高 60%，背景弥散才够
     'sink': 0.06,          # ★ 脚陷入地面的深度。精确贴面时间隙 0.019，
                            #   MC 方块边缘锐利，这点缝会读成"悬浮"
     'res': '1280x720',
-    'samples': 192,        # 出图采样（优化方案 §6：预览 128 / 正式 192）
+    # ★ P0-1 速度包：两段式渲染。
+    #   试渲档（定机位/试参数/auto_adjust 迭代）用小图少采样，只给审图看构图；
+    #   最后一档才按正式参数出图。原来每轮都跑 192 采样 + 1080p，
+    #   实测单张渲染 52–54s，三轮就是 3 分钟。
+    'res_preview': '960x540',
+    'samples_preview': 16,
+    'samples': 48,         # 正式出图采样（192→48；EEVEE 5.x 下 48 已无明显噪点）
+    'vol_samples': 32,     # 体积雾采样（96→32；雾本身柔和，32 足够，且省最多时间）
+    'max_attempts': 2,     # 迭代封顶 2 轮（原来是 3，且第 3 轮常被 auto_adjust 白跑）
 }
+
+
+def gpu_args():
+    """★ P0-1 v3：Blender 的 GPU 后端开关。
+
+    实测（同一 .blend，本机 Windows / AMD）：
+      OpenGL 后端：首帧 960x540/16 = 42.2s，1080p/48 = 5.2s
+      Vulkan 后端：首帧 960x540/16 = 12.2s，1080p/48 = 4.6s
+    首帧那 40 秒里有一大半是 OpenGL 后端的着色器编译/上下文初始化，
+    换 Vulkan 直接省掉约 30 秒（空场景一个立方体：19.7s → 5.6s）。
+
+    DSH_GPU_BACKEND=none / opengl 可关掉（老显卡、驱动不支持 Vulkan 时）；
+    也接受填任意 Blender 支持的后端名（opengl / vulkan / metal）。
+    """
+    mode = (os.environ.get('DSH_GPU_BACKEND') or 'vulkan').strip().lower()
+    if mode in ('', 'none', 'off', '0', 'disable', 'no'):
+        return []
+    return ['--gpu-backend', mode]
+
+
+def _strip_gpu(args):
+    """把 ['--gpu-backend', 'vulkan'] 从命令行里摘掉（回退 OpenGL 用）。"""
+    out = []
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a == '--gpu-backend':
+            skip = True
+            continue
+        out.append(a)
+    return out
 
 
 def run(cmd, log=None, timeout=None, cwd=None, env=None):
@@ -355,7 +406,7 @@ def step_import_blend(blender_exe, obj, out_dir, name='背景_世界',
     目标是让用户打开 Blender 就能在背景地图上继续做动画。
     """
     script = os.path.join(BLENDER_DIR, 'import_map.py')
-    args = [blender_exe, '-b', '--factory-startup', '--python', script, '--',
+    args = [blender_exe, '-b', *gpu_args(), '--factory-startup', '--python', script, '--',
             obj, out_dir, name, res, str(int(samples)), '1' if preview else '0']
     rc, out = run(args, log=os.path.join(out_dir, '_import.log'))
     blend = os.path.join(out_dir, name + '.blend')
@@ -440,14 +491,20 @@ def _png_size(path):
         return None
 
 
-def step_render(blender_exe, obj, out_dir, params, progress=print):
+def step_render(blender_exe, obj, out_dir, params, progress=print, stages=None):
     """③ 用 Blender 搭场景并渲染
 
     ★ 分辨率 / 采样走环境变量：build_cover.py 里的 DSH_RES_X/Y 和 DSH_SAMPLES。
       之前 params['res'] 完全没接线 —— 结果.json 写 1280x720，实际出 960x540。
+
+    ★★ P0-1 v2：`stages` 给了就【一个 Blender 进程做完所有渲染】。
+      实测第 1 张 42s、第 2 张 1.3s、第 3 张（1080p/48）5.2s —— 40 秒是每进程
+      一次的着色器/GPU 上下文开销，跟采样数无关。所以「建场景 → 试渲 → 定稿」
+      必须在同一个进程里，而不是存 .blend、再起第二个进程 `-f 1`。
+      stages = [{'tag','path','res':[w,h],'samples'}...]；返回 (blend, [png...])。
     """
     script = os.path.join(BLENDER_DIR, 'build_cover.py')
-    args = [blender_exe, '-b', '--factory-startup', '--python', script, '--',
+    args = [blender_exe, '-b', *gpu_args(), '--factory-startup', '--python', script, '--',
             obj, out_dir,
             str(params['yaw']), str(params['lens']), params['view_transform'],
             str(params['sky_strength']), str(params['cam_az']), str(params['dist']),
@@ -477,10 +534,18 @@ def step_render(blender_exe, obj, out_dir, params, progress=print):
             env['DSH_RES_Y'] = str(h)
         except ValueError:
             progress(f'    ⚠️ 分辨率写法不认识: {params.get("res")}，用默认')
-    env['DSH_SAMPLES'] = str(int(params.get('samples', 192)))
+    env['DSH_SAMPLES'] = str(int(params.get('samples', 48)))
+    # ★ P0-1：体积雾采样以前写死在 build_cover.py 的 96，没法按档位降。
+    if params.get('vol_samples') is not None:
+        env['DSH_VOL_SAMPLES'] = str(int(params['vol_samples']))
     # ★ P0-4 补漏：light_scale 以前只改 params，从没传进 Blender ——
     #   auto_adjust 里的 light_scale *= 1.8 是空转，渲染永远用基准灯。
     env['DSH_KEY_SCALE'] = str(float(params.get('light_scale', 1.0)))
+    # ★ P0-2：轮廓光单独倍率 + 背景档位（world / clean / studio）
+    env['DSH_RIM_SCALE'] = str(float(params.get('rim_scale', params.get('light_scale', 1.0))))
+    _bd = str(params.get('backdrop') or '').strip().lower()
+    if _bd:
+        env['DSH_BACKDROP'] = _bd
     # ★ P1-1 雾开关：默认开；调用方环境里已显式设了 DSH_MC_FOG 就尊重它
     env.setdefault('DSH_MC_FOG', '1')
     # ★★ P0 断链修复：以下参数以前【只进了 params，从没传到 Blender】——
@@ -533,13 +598,34 @@ def step_render(blender_exe, obj, out_dir, params, progress=print):
         if params.get('item_l') is not None:
             env['DSH_ITEM_L'] = str(params['item_l'])
     t0 = time.time()
+    if stages:
+        env['DSH_STAGES'] = json.dumps(stages, ensure_ascii=False)
     rc, out = run(args, log=os.path.join(out_dir, '_build.log'), env=env)
+    if rc != 0 and gpu_args():
+        # ★ 兜底：某些老显卡 / 驱动没有可用的 Vulkan，Blender 会在启动阶段就退出。
+        #   这时把 --gpu-backend 摘掉、退回 OpenGL 重试一次，别让整个任务失败。
+        progress('    ⚠️ GPU 后端启动失败，退回 OpenGL 重试一次…')
+        args = _strip_gpu(args)
+        rc, out = run(args, log=os.path.join(out_dir, '_build.log'), env=env)
     if rc != 0:
         raise RuntimeError(f'搭场景失败\n{out[-2000:]}')
     blend = os.path.join(out_dir, '封面_世界.blend')
     if not os.path.isfile(blend):
         raise RuntimeError(f'没生成 .blend\n{out[-2000:]}')
-    rc, out = run([blender_exe, '-b', blend, '-f', '1'],
+    if stages:
+        pngs = []
+        for st in stages:
+            png = st.get('path')
+            if not png or not os.path.isfile(png):
+                raise RuntimeError(f'渲染没出图: {png}\n{out[-2000:]}')
+            size = _png_size(png)
+            pngs.append(png)
+            progress(f"    [{st.get('tag') or 'stage'}] {png}"
+                     + (f'  ({size[0]}x{size[1]})' if size else ''))
+        progress(f'    一个 Blender 进程出完 {len(pngs)} 张，'
+                 f'搭场景+渲染共 {time.time() - t0:.1f}s')
+        return blend, pngs
+    rc, out = run([blender_exe, '-b', *gpu_args(), blend, '-f', '1'],
                   log=os.path.join(out_dir, '_render.log'), env=env)
     png = os.path.join(out_dir, '封面_世界0001.png')
     if not os.path.isfile(png):
@@ -631,6 +717,27 @@ def auto_adjust(params, report):
         new['light_scale'] = min(4.0, params['light_scale'] * 1.8)
         fixes.append(f"灯光倍率 {params['light_scale']} → {new['light_scale']}")
 
+    # ★ P0-2：轮廓光缺失 → 只抬 Rim 灯（以前这条永远没有修法，auto_adjust
+    #   直接报「没有可自动修的项」，等于白跑一轮）。rim_bright_frac 反复落在
+    #   0.13 左右、要求 >0.25，说明不是整体亮度不够，而是背光那一盏太弱。
+    if '没有轮廓光' in issues:
+        _rim = float(params.get('rim_scale', params.get('light_scale', 1.0)))
+        new['rim_scale'] = min(6.0, _rim * 1.8)
+        fixes.append(f"轮廓光倍率 {_rim:.2f} → {new['rim_scale']:.2f}（补 rim）")
+
+    # ★ P0-2：天空死板 → 换 AgX / 抬天空强度。
+    #   「标准」视图转换会把 SKY 纹理钳到 0.05（build_cover 里为了防削顶），
+    #   结果天空是一块无渐变的死灰；先换 AgX，AgX 下才谈得上加强度。
+    if ('死板纯色' in issues or '缺大气层次' in issues) and '过曝' not in issues:
+        _vt = str(params.get('view_transform', '')).lower()
+        if _vt in ('standard', '标准', 'raw'):
+            new['view_transform'] = 'AgX'
+            fixes.append(f"视图转换 {params.get('view_transform')} → AgX（让天空有渐变）")
+        # ⚠️ 不抬 sky_strength：实测 0.12 → 0.216 会把暗部整体洗白，
+        #    审图从「天空死板」变成「动态范围偏窄、画面发灰」（clean_test2）。
+        #    AgX 下天空太平是物理天空 + 雾本身的性质，靠强度变量修不动，
+        #    与其白跑一轮，不如把这条留给人（改 hour / 加云 / 换 backdrop）。
+
     # 背面 → 转 180°
     if '背面' in issues:
         new['yaw'] = (params['yaw'] + 180.0) % 360.0
@@ -662,17 +769,20 @@ def auto_adjust(params, report):
 
 def shoot(save, area, out_root, blender=None, params=None, center=None,
           radius=44, ymin=56, ymax=90, horizon=150,
-          max_attempts=3, target_score=85, progress=print):
+          max_attempts=2, target_score=85, progress=print):
     """一站式：找机位 → 导出 → 渲染 → 审图 → 不达标自动重渲
 
     返回 {'shot':…, 'params':…, 'png':…, 'blend':…, 'report':…, 'attempts':[…]}
     """
+    t_all = time.time()
     os.makedirs(out_root, exist_ok=True)
     # ⚠️ 输出目录必须转绝对路径：Blender 拿到的相对路径是按【工程/工作目录】解析的，
     #   写不进去就只报 "No such file or directory"，图白渲一遍（实测踩到）。
     out_root = os.path.abspath(out_root)
     p = dict(DEFAULTS)
     p.update(params or {})
+    # 参数里能覆盖迭代轮数（CLI --attempts / 插件字段都走 params）
+    max_attempts = int(p.get('max_attempts') or max_attempts)
 
     # ⓿ ★ 开跑之前先检查条件 —— 缺东西就在这里拦住并给出安装指引，
     #    而不是渲染到一半报个看不懂的错。
@@ -721,23 +831,90 @@ def shoot(save, area, out_root, blender=None, params=None, center=None,
     blender_exe = find_blender(blender)
     progress(f'[3/5] Blender: {blender_exe}')
     history = []
-    for attempt in range(1, max_attempts + 1):
-        sub = os.path.join(out_root, f'尝试{attempt}')
-        os.makedirs(sub, exist_ok=True)
-        progress(f'[4/5] 第 {attempt} 次渲染（{p["view_transform"]} / '
-                 f'天空{p["sky_strength"]} / 灯×{p["light_scale"]} / '
-                 f'yaw{p["yaw"]}° / 距离{p["dist"]:.1f} / 下沉{p["sink"]}）')
-        blend, png = step_render(blender_exe, obj, sub, p, progress=progress)
+    timing = {'export': round(time.time() - t_all, 2),
+              'render': 0.0, 'check': 0.0}
+
+    # ★ P0-1 v2 同进程两段式：
+    #   实测同一个 .blend：【第 1 张 42s（着色器编译 / GPU 上下文，每进程一次）、
+    #   第 2 张 1.3s、1920x1080/48 只要 5.2s】—— 那 40 秒跟分辨率、采样数无关
+    #   （samples 16 与 1 都是 41s；空场景一个立方体也要 17s）。所以省时间的
+    #   唯一办法是【少起 Blender 进程】：试渲档和定稿档必须在同一个进程里渲完。
+    #   之前是「每轮一个进程 + 定稿再起一个进程」，光进程开销就付了两遍。
+    FULL_RES = str(p.get('res') or '1280x720')
+    FULL_SAMPLES = int(p.get('samples') or 48)
+    PREV_RES = str(p.get('res_preview') or FULL_RES)
+    PREV_SAMPLES = int(p.get('samples_preview') or 16)
+
+    def _res_pair(s):
+        try:
+            w, h = (int(v) for v in str(s).lower().replace('×', 'x').split('x')[:2])
+            return [w, h]
+        except (TypeError, ValueError):
+            return [1920, 1080]
+
+    def _check(png_):
         progress('[5/5] 审图…')
-        rep = step_check(png, progress=progress,
-                         annotate=os.path.join(out_root, '审图'))
-        history.append({'attempt': attempt, 'params': dict(p),
-                        'png': png, 'blend': blend,
-                        'verdict': rep['verdict'], 'score': rep['score'],
-                        'issues': rep['issues'],
-                        # ★ P0-0：Blender 投影出来的主体框 + 全部原始指标数值
-                        'subject_box': rep.get('details', {}).get('subject_box'),
-                        'details': rep.get('details')})
+        _c = time.time()
+        try:
+            return step_check(png_, progress=progress,
+                              annotate=os.path.join(out_root, '审图'))
+        finally:
+            timing['check'] += time.time() - _c
+
+    def _one(pp, tag, final_pp=None):
+        """一个 Blender 进程：搭场景 → 渲试渲档 →（可选）渲定稿档。"""
+        sub = os.path.join(out_root, tag)
+        os.makedirs(sub, exist_ok=True)
+        trial_png = os.path.join(sub, '封面_世界0001.png')
+        stages = [{'tag': 'trial', 'path': trial_png,
+                   'res': _res_pair(pp.get('res')),
+                   'samples': int(pp.get('samples') or PREV_SAMPLES)}]
+        final_png = None
+        if final_pp is not None and (_res_pair(final_pp.get('res'))
+                                     != _res_pair(pp.get('res'))
+                                     or int(final_pp.get('samples') or 0)
+                                     != int(pp.get('samples') or 0)):
+            fsub = os.path.join(out_root, '定稿')
+            os.makedirs(fsub, exist_ok=True)
+            final_png = os.path.join(fsub, '封面_世界0001.png')
+            stages.append({'tag': 'final', 'path': final_png,
+                           'res': _res_pair(final_pp.get('res')),
+                           'samples': int(final_pp.get('samples') or FULL_SAMPLES)})
+        _t = time.time()
+        blend_, pngs = step_render(blender_exe, obj, sub, pp,
+                                   progress=progress, stages=stages)
+        timing['render'] += time.time() - _t
+        return blend_, pngs[0], final_png
+
+    def _push(attempt, params_, png_, rep_, stage=None):
+        rec = {'attempt': attempt, 'params': dict(params_),
+               'png': png_, 'blend': blend,
+               'verdict': rep_['verdict'], 'score': rep_['score'],
+               'issues': rep_['issues'],
+               # ★ P0-0：Blender 投影出来的主体框 + 全部原始指标数值
+               'subject_box': rep_.get('details', {}).get('subject_box'),
+               'details': rep_.get('details')}
+        if stage:
+            rec['stage'] = stage
+        history.append(rec)
+        return rec
+
+    final_png = None
+    blend = None
+    for attempt in range(1, max_attempts + 1):
+        p['res'] = PREV_RES
+        p['samples'] = PREV_SAMPLES
+        fin = dict(p)
+        fin['res'] = FULL_RES
+        fin['samples'] = FULL_SAMPLES
+        progress(f'[4/5] 第 {attempt} 次渲染（试渲 {PREV_RES} / {PREV_SAMPLES} 采样 + '
+                 f'定稿 {FULL_RES} / {FULL_SAMPLES}，同一进程；'
+                 f'{p["view_transform"]} / 天空{p["sky_strength"]} / '
+                 f'灯×{p["light_scale"]} / yaw{p["yaw"]}° / '
+                 f'距离{p["dist"]:.1f} / 下沉{p["sink"]}）')
+        blend, png, final_png = _one(p, f'尝试{attempt}', final_pp=fin)
+        rep = _check(png)
+        _push(attempt, p, png, rep)
         if rep['verdict'] == 'PASS' and rep['score'] >= target_score:
             progress(f'    ✅ 达标（{rep["score"]} ≥ {target_score}），停止迭代')
             break
@@ -752,6 +929,15 @@ def shoot(save, area, out_root, blender=None, params=None, center=None,
             progress(f'    🔧 {f}')
         p = nxt
 
+    # ★ 定稿档已经在同一个进程里渲好了，这里只补一次审图（约 0.2s）。
+    if final_png and os.path.isfile(final_png):
+        progress(f'[定稿] 审图（正式档 {FULL_RES} / {FULL_SAMPLES} 采样）…')
+        final_params = dict(history[-1]['params'])
+        final_params['res'] = FULL_RES
+        final_params['samples'] = FULL_SAMPLES
+        frep = _check(final_png)
+        _push(len(history) + 1, final_params, final_png, frep, stage='final')
+
     final = history[-1]
     size = _png_size(final['png'])
     res_req = final['params'].get('res')
@@ -760,11 +946,17 @@ def shoot(save, area, out_root, blender=None, params=None, center=None,
         want = str(res_req).lower().replace('×', 'x').replace(' ', '')
         if want != res_actual:
             progress(f'    ⚠️ 分辨率不一致：请求 {want}，实际 {res_actual}')
+    timing['total'] = round(time.time() - t_all, 2)
+    timing['render'] = round(timing['render'], 2)
+    timing['check'] = round(timing['check'], 2)
+    progress(f'    ⏱ 总耗时 {timing["total"]}s '
+             f'(导出 {timing["export"]}s / 渲染 {timing["render"]}s / 审图 {timing["check"]}s)')
     result = {'center': center, 'params': final['params'], 'png': final['png'],
               'blend': final['blend'], 'verdict': final['verdict'],
               'score': final['score'], 'issues': final['issues'],
               'subject_box': final.get('subject_box'),
               'res_requested': res_req, 'res_actual': res_actual,
+              'timings': timing,
               'finished_at': time.strftime('%Y-%m-%d %H:%M:%S'),
               'attempts': history}
     with open(os.path.join(out_root, '结果.json'), 'w', encoding='utf-8') as f:
@@ -826,12 +1018,12 @@ def animate(blender_exe, blend, out_dir, total=240, fps=24, kind='aura',
         script = os.path.join(BLENDER_DIR, _SCRIPTS.get(kind, 'animate_aura.py'))
     os.makedirs(out_dir, exist_ok=True)
     out_dir = os.path.abspath(out_dir)      # 同上：相对路径 Blender 会写不进去
-    args = [blender_exe, '-b', blend, '--python', script, '--',
+    args = [blender_exe, '-b', *gpu_args(), blend, '--python', script, '--',
             out_dir, str(total), str(fps), preview or '']
     if recipe:
         # 配方里有 duration，但调用方（mc_anim / mc_film / 提示词）给的时长优先：
         # anim_kit 会补循环遍数或重定时，不再静默忽略 --frames。
-        args = [blender_exe, '-b', blend, '--python', script, '--',
+        args = [blender_exe, '-b', *gpu_args(), blend, '--python', script, '--',
                 out_dir, str(total), str(fps), preview or '', recipe]
     t0 = time.time()
     rc, out = run(args, log=os.path.join(out_dir, '_anim.log'))
@@ -845,7 +1037,7 @@ def animate(blender_exe, blend, out_dir, total=240, fps=24, kind='aura',
                            f'{out[-2000:]}')
     if preview:
         return {'blend': ablend, 'frames': None, 'preview': True}
-    rc, out = run([blender_exe, '-b', ablend, '-a'],
+    rc, out = run([blender_exe, '-b', *gpu_args(), ablend, '-a'],
                   log=os.path.join(out_dir, '_render.log'))
     n = len([f for f in os.listdir(out_dir) if f.startswith('frame_')])
     if n == 0:

@@ -66,6 +66,15 @@ def match_rigs(query):
     return [r for r in rows if q in r[1].lower() or q == r[0].lower()]
 
 
+def _gpu_args():
+    """★ P0-1 v3：优先用 Vulkan 后端（首帧比 OpenGL 快约 30s）。
+    DSH_GPU_BACKEND=none / opengl 可关掉。"""
+    mode = (os.environ.get('DSH_GPU_BACKEND') or 'vulkan').strip().lower()
+    if mode in ('', 'none', 'off', '0', 'disable', 'no'):
+        return []
+    return ['--gpu-backend', mode]
+
+
 SPAWN_PY = r'''
 import bpy, sys, os
 from mathutils import Vector
@@ -168,7 +177,7 @@ def spawn(name, blend, out, blender_exe, pos=(0, 0, 0), scale=1.0, keyword=None)
     # 文件名形如 "Fox Panda - Boxscape"，取作者名之前那一段当关键词：
     # 里面可能有两个角色词（Fox / Panda），由 SPAWN_PY 选命中最长的那个骨架。
     kw = keyword or rig_name.split(" - ")[0].strip()
-    cmd = [blender_exe, "-b", blend, "--python", script, "--",
+    cmd = [blender_exe, "-b", *_gpu_args(), blend, "--python", script, "--",
            rig_path, kw, out, "%g,%g,%g" % tuple(pos), str(scale)]
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     log = (proc.stdout or "") + (proc.stderr or "")

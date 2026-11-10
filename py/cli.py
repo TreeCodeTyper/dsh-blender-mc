@@ -365,6 +365,13 @@ def cmd_shoot(a):
         params['res'] = a.res
     if a.samples:
         params['samples'] = a.samples
+    if getattr(a, 'vol_samples', None):
+        params['vol_samples'] = a.vol_samples
+    # ★ P0-2 干净包
+    if getattr(a, 'backdrop', None):
+        params['backdrop'] = a.backdrop
+    if getattr(a, 'rim_scale', None) is not None:
+        params['rim_scale'] = a.rim_scale
     # ── v0.5.0 新参数：只把「用户真给了」的塞进去 ─────────────────────
     #    item 的空字符串是合法值（= 空手），所以按 is not None 判断；
     #    pipeline.step_render 也按 is not None 决定要不要设 env，
@@ -817,11 +824,23 @@ def main():
     h.add_argument('--sky', type=float, default=None)
     h.add_argument('--sink', type=float, default=None)
     h.add_argument('--res', type=_res, default=None, help='输出尺寸，如 1920x1080（默认 1280x720）')
-    h.add_argument('--samples', type=_posint, default=None, help='EEVEE 采样数，默认 256')
+    h.add_argument('--samples', type=_posint, default=None,
+                   help='正式档 EEVEE 采样数，默认 48（试渲档固定 16；调高更干净、更慢）')
+    h.add_argument('--vol-samples', dest='vol_samples', type=_posint, default=None,
+                   help='体积雾采样，默认 32（96 是渲染耗时大头）')
     h.add_argument('--view-transform', default=None)
+    # ★ P0-2 干净包：背景三档 + 轮廓光单独倍率
+    h.add_argument('--backdrop', default=None,
+                   choices=['world', 'clean', 'studio'],
+                   help='背景：world=用导出的地形（默认，可能带切面土墙/建筑残骸）/ '
+                        'clean=隐藏地形换平铺草地（背景干净）/ '
+                        'studio=中性灰地面（棚拍/抠图）')
+    h.add_argument('--rim-scale', dest='rim_scale', type=float, default=None,
+                   help='轮廓光倍率（单独加 Rim 灯，默认跟 light_scale 一致）')
     h.add_argument('--skin', default=None,
                    help='人物皮肤：绝对路径，或皮肤库里的名字（<DSH_HOME>/blender-mc/skins/）')
-    h.add_argument('--attempts', type=_posint, default=3)
+    h.add_argument('--attempts', type=_posint, default=2,
+                   help='迭代轮数上限（试渲档），默认 2；最后总会再出一张正式档定稿')
     h.add_argument('--target', type=int, default=85)
     # ── v0.4.9 新参数：全部可选，不给 = 与 v0.4.6 完全一致 ────────────────
     #    名字必须与 docs/NEW_PARAMS.md 第三节一致：lib/index.js 是按
