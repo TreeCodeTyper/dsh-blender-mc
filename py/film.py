@@ -259,9 +259,18 @@ def _stitch_with_transitions(ffmpeg, segments, shots, out_dir, plan, fps, res,
             parts.append('%s[%d:v]xfade=transition=%s:duration=%.4f:offset=%.4f%s'
                          % (cur, k, name, dd, off, lab))
             total += durs[k] - dd
-            progress('    转场 %s → %s：%s %.2fs'
-                     % (segments[k - 1][0]['id'], segments[k][0]['id'],
-                        t['type'], dd))
+            # ★ B10 修复：请求时长被裁短时必须说出来，否则成片比计划短
+            #   而分镜表仍写着原值，事后对不上账。
+            if dd + 1e-6 < t['dur']:
+                progress('    转场 %s → %s：%s %.2fs（请求 %.2fs，'
+                         '受相邻镜头时长限制已裁短）'
+                         % (segments[k - 1][0]['id'], segments[k][0]['id'],
+                            t['type'], dd, t['dur']))
+                t['dur_effective'] = round(dd, 3)
+            else:
+                progress('    转场 %s → %s：%s %.2fs'
+                         % (segments[k - 1][0]['id'], segments[k][0]['id'],
+                            t['type'], dd))
         cur = lab
 
     title = plan.get('title') or DEFAULTS['title']
@@ -444,6 +453,12 @@ def film(blender_exe, plan, out_dir, animatic=False, progress=print):
     with open(md, 'w', encoding='utf-8') as f:
         f.write('# %s 分镜表\n\n' % title)
         f.write('- %s @ %g fps，共 %d 帧 / %.2f 秒\n' % (res, fps, n_total, n_total / fps))
+        # ★ R13：转场会吃掉帧（xfade/dip 让相邻镜头重叠），成片帧数必然比
+        #   「各镜 frames 之和」少。以前只写一个总数，看起来像渲染丢了帧。
+        _req = sum(int(s['frames']) for s in shots)
+        if _req != n_total:
+            f.write('- 各镜合计 %d 帧，转场重叠裁掉 %d 帧 → 成片 %d 帧 / %.2f 秒\n'
+                    % (_req, _req - n_total, n_total, n_total / fps))
         f.write('- 封面工程：`%s`\n' % blend_src)
         f.write('- 渲染：%d samples，H.264 crf %s\n\n' % (samples, crf))
         f.write('| 镜号 | 景别 | 机位 / 运动 | 转场 | 帧区间 | 时长 | 画面内容 |\n')
@@ -452,6 +467,10 @@ def film(blender_exe, plan, out_dir, animatic=False, progress=print):
             tr = s.get('transition') or {}
             tr_txt = '—' if tr.get('type', 'cut') == 'cut' else '%s %.2fs' % (
                 tr.get('type'), tr.get('dur') or 0)
+            # ★ B10：实际用了多长要写进分镜表，别只记请求值
+            if tr.get('dur_effective') and abs(
+                    (tr.get('dur_effective') or 0) - (tr.get('dur') or 0)) > 1e-3:
+                tr_txt += '（实 %.2fs）' % tr['dur_effective']
             f.write('| %s | %s | %s | %s | %d–%d | %.2fs | %s |\n'
                     % (s['id'], s.get('shot_size') or '—', s.get('camera') or '—',
                        tr_txt,

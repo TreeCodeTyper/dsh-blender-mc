@@ -120,9 +120,50 @@ def catmull_rom(points, samples_per_seg=8):
     return out
 
 
+def _snap_valid(valid, x0, z0, p, radius=6):
+    """把请求点吸附到最近的可站格子。
+
+    返回 ((lx, lz), 距离) 或 (None, None)。
+
+    ★ B03 修复的根因就在这：
+      surface_map 会把树冠下、水下、头顶有方块的列剔掉，而用户给的
+      坐标（往往是 shoot 报出来的机位）经常正好落在一个被剔掉的列上。
+      实测 m_65dbd9dabb91 里 (98,54) 离最近的可站格子只有 1 格、
+      (160,120) 只有 4 格 —— 以前 astar 直接判「起点不合法 → []」，
+      CLI 又原样 exit 0 写个空 json，看起来就像功能坏了。
+    """
+    import math as _m
+    h, w = valid.shape
+    px, pz = int(p[0]), int(p[1])
+    cx, cz = px - x0, pz - z0
+    if 0 <= cx < w and 0 <= cz < h and valid[cz, cx]:
+        return (cx, cz), 0.0
+    best = None
+    for r in range(1, int(radius) + 1):
+        for dz in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                if max(abs(dx), abs(dz)) != r:
+                    continue
+                x, z = cx + dx, cz + dz
+                if not (0 <= x < w and 0 <= z < h):
+                    continue
+                if valid[z, x]:
+                    d = _m.hypot(dx, dz)
+                    if best is None or d < best[1]:
+                        best = ((x, z), d)
+        if best is not None:
+            return best
+    return None, None
+
+
 def plan_camera_path(top, start, goal, bounds=None, samples_per_seg=8,
-                     height_offset=2.5):
-    """一站式：A* → Theta* → Catmull-Rom，返回 [(x,z,y)]。"""
+                     height_offset=2.5, snap_radius=6, info=None):
+    """一站式：A* → Theta* → Catmull-Rom，返回 [(x,z,y)]。
+
+    info（可选 dict）会被填上 snap / 错误原因，方便调用方说人话。
+    """
+    if info is None:
+        info = {}
     if bounds is None:
         xs = [k[0] for k in top]
         zs = [k[1] for k in top]
@@ -130,8 +171,25 @@ def plan_camera_path(top, start, goal, bounds=None, samples_per_seg=8,
     x0, z0, height, valid, _ = _grid(top, bounds, want_grass=False)
     sx, sz = int(start[0]), int(start[1])
     gx, gz = int(goal[0]), int(goal[1])
-    path = astar(height, valid, (sx - x0, sz - z0), (gx - x0, gz - z0))
+    (a, da) = _snap_valid(valid, x0, z0, (sx, sz), snap_radius)
+    (b, db) = _snap_valid(valid, x0, z0, (gx, gz), snap_radius)
+    if a is None:
+        info['error'] = (
+            '起点 (%d,%d) 附近 %d 格内没有可站地面（水面/树冠/墙里？）'
+            % (sx, sz, int(snap_radius)))
+        return []
+    if b is None:
+        info['error'] = (
+            '终点 (%d,%d) 附近 %d 格内没有可站地面（水面/树冠/墙里？）'
+            % (gx, gz, int(snap_radius)))
+        return []
+    info['snap'] = {'start': [a[0] + x0, a[1] + z0, round(da, 2)],
+                    'goal': [b[0] + x0, b[1] + z0, round(db, 2)]}
+    path = astar(height, valid, a, b)
     if not path:
+        info['error'] = ('起点 (%d,%d) 到终点 (%d,%d) 之间没有可走通的路径'
+                         '（可能是被水/墙隔开，放大 --area 或换点）'
+                         % (a[0] + x0, a[1] + z0, b[0] + x0, b[1] + z0))
         return []
     # ★ 平滑必须在局部坐标做：height/valid 的索引是 [z-z0, x-x0]
     smooth = theta_smooth(path, height, valid)
@@ -157,14 +215,33 @@ if __name__ == '__main__':
     ap.add_argument('--start', required=True, help='x,z')
     ap.add_argument('--goal', required=True, help='x,z')
     ap.add_argument('--out', default='')
+    ap.add_argument('--snap-radius', type=int, default=6,
+                    help='起终点吸附到可站格子的最大距离（默认 6 格）')
     a = ap.parse_args()
     x0, x1, z0, z1 = (int(v) for v in a.area.split(','))
     st = tuple(int(v) for v in a.start.split(','))
     gl = tuple(int(v) for v in a.goal.split(','))
     w = World(a.save)
     top = surface_map(w, x0, x1, z0, z1, y0=50, y1=200)
-    path = plan_camera_path(top, st, gl, bounds=(x0, x1, z0, z1))
+    info = {}
+    path = plan_camera_path(top, st, gl, bounds=(x0, x1, z0, z1),
+                            snap_radius=a.snap_radius, info=info)
     data = {'start': list(st), 'goal': list(gl), 'points': path}
+    if info.get('snap'):
+        s = info['snap']['start']
+        g = info['snap']['goal']
+        data['snapped'] = info['snap']
+        if s[2] or g[2]:
+            print('吸附：起点 (%.0f,%.0f) 偏 %.1f 格，终点 (%.0f,%.0f) 偏 %.1f 格'
+                  % (s[0], s[1], s[2], g[0], g[1], g[2]))
+    if info.get('error'):
+        # ★ B03：不再静默写空 json，说清楚为什么
+        print('!! ' + info['error'])
+        data['error'] = info['error']
+        if a.out:
+            with open(a.out, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        raise SystemExit(2)
     print(json.dumps(data, ensure_ascii=False, indent=2))
     if a.out:
         with open(a.out, 'w', encoding='utf-8') as f:

@@ -237,6 +237,18 @@ def compile_prompt(prompt: str, character: str = "ai-rig-v0") -> dict[str, Any]:
     _set_face(spec, text)
     _set_head(spec, text)
     _set_camera(spec, text)
+    # ★ R07：外观词（发色/服装/武器）本来就【没有】消费方 —— 这个 rig 只有
+    #   Steve/Alex 两张皮肤，长袍长什么样是皮肤贴图决定的。以前这些词被
+    #   静默吞掉，用户看到「银发女剑客」却出 Steve 完全不知道为什么。
+    _APPEAR = ('发', '袍', '外套', '盔甲', '甲胄', '衣', '裙', '靴', '帽', '斗篷',
+               '红', '蓝', '金', '银', '紫', '绿', '黑', '白', '灰', '棕',
+               '剑', '盾', '弓', '法杖', '少年', '少女', '女', '男')
+    _hit = [w for w in _APPEAR if w in text]
+    if _hit:
+        spec.setdefault('warnings', []).append(
+            '外观词不生效：%s —— 本 rig 只有 steve/alex 两张皮肤，'
+            '发色/服装/武器由皮肤贴图决定，请用 --skin <64x64 PNG> 指定'
+            % '、'.join(_hit[:6]))
     return normalize_camera(spec)
 
 

@@ -175,19 +175,41 @@ if HOUR is not None:
     # 6 点日出、18 点日落；仰角按正弦走，正午封顶 62°（再高变顶光，脸全黑）
     _s = math.sin(math.pi * (HOUR - 6.0) / 12.0)      # 6→0, 12→1, 18→0, 0/24→-1
     _elev = 62.0 * _s
-    SUN_DAY = _elev > 2.0
+    # ★ R05：判据从「仰角 > 2°」换成连续日光因子 k（-6°→+8° 过渡），
+    #   否则 6 点与 18 点 elev 恰好为 0，两支都落进夜里（月光冷蓝）。
+    #   与 anim_kit._sun_for_hour 保持一致。
+    _k = max(0.0, min(1.0, (_elev + 6.0) / 14.0))
+    SUN_DAY = _k > 0.0
     if not os.environ.get('DSH_SUN_ELEV'):
         SUN_ELEV = max(-8.0, _elev)
     if not os.environ.get('DSH_SUN_INT'):
-        SUN_INT = (6.0 * min(1.0, max(0.0, _elev / 30.0 + 0.25)) if SUN_DAY else 1.2)
+        _day_e = 6.0 * min(1.0, max(0.0, _elev / 30.0 + 0.25))
+        SUN_INT = max(0.02, 1.2 + (_day_e - 1.2) * _k) if SUN_DAY else 1.2
     if not os.environ.get('DSH_SUN_COLOR'):
         _warm = max(0.0, min(1.0, (30.0 - _elev) / 30.0)) if SUN_DAY else 1.0
-        SUN_COLOR = (1.0, 0.70 + 0.25 * (1.0 - _warm), 0.42 + 0.45 * (1.0 - _warm))
-        if not SUN_DAY:
-            SUN_COLOR = (0.55, 0.68, 1.0)      # 夜里当月光用，别拿暖橙打冷景
+        _day_col = (1.0, 0.70 + 0.25 * (1.0 - _warm), 0.42 + 0.45 * (1.0 - _warm))
+        _night_col = (0.55, 0.68, 1.0)
+        SUN_COLOR = tuple(_night_col[i] + (_day_col[i] - _night_col[i]) * _k
+                          for i in range(3)) if SUN_DAY else _night_col
+        # ★ R05 第二半（与 anim_kit._sun_for_hour 同一条公式）：
+        #   6 点与 18 点仰角都是 0°，靠色温分晨昏：晨偏冷粉、昏偏橙红。
+        _low = max(0.0, 1.0 - _elev / 22.0)
+        if _low > 0.0:
+            _tint = (0.98, 0.86, 0.92) if HOUR < 12.0 else (1.00, 0.66, 0.44)
+            _w = 0.55 * _low
+            SUN_COLOR = tuple(SUN_COLOR[i] * (1.0 - _w) + _tint[i] * _w
+                              for i in range(3))
     # 天空强度：白天足、黄昏稍暗、夜里压低但【绝不为 0】（0 = 背景黑屏）
     _sky_k = 1.0 if 7.0 <= HOUR <= 17.0 else (0.55 if SUN_DAY else 0.20)
     SKY = max(0.03, min(1.0, SKY * _sky_k))
+
+# ★ B02 关联：把「这个工程是按几点建的」记进场景自定义属性。
+#   anim/film 在一份已烘好的 .blend 上渲帧，只有知道原始时刻，
+#   才能判断「这一镜要换时间」到底要不要重新摆灯。
+try:
+    bpy.context.scene['dsh_hour'] = float(HOUR) if HOUR is not None else -1.0
+except Exception:
+    pass
 
 # ★ 贴图过滤 / 背景虚化 / 云 / 雾（v0.5.0）
 #   「背景咋是糊的，看着后面是一堆二维码一样的」——
@@ -577,8 +599,12 @@ if BACKDROP in ('clean', 'studio', 'plane', 'none'):
             _uv.data[_i].uv = _uvs[_lp.vertex_index]
         # ★ 优先直接复用导出地形里那块草地材质（MCprep 已经把群系 tint
         #   算进节点里了），比手搓「灰度贴图 × 绿色」准得多。
+        # ★ B07：默认【不】复用 MCprep 地形材质。它的贴图走 Generated/Box 投影，
+        #   在我们这块 600×600 的大平地上会被拉成一整片渐变，一格方块都看不出来
+        #   （clean 档实测）。下面那条「新建材质 + 贴图」的路子，Vector 不接就是
+        #   走 UVMap，一格一 tile，反而是对的。要复用旧行为传 DSH_REUSE_GRASS=1。
         _reuse = None
-        if textured:
+        if textured and os.environ.get('DSH_REUSE_GRASS') == '1':
             for _o in wmesh:
                 for _sl in (getattr(_o, 'material_slots', None) or []):
                     _m = _sl.material
@@ -601,8 +627,33 @@ if BACKDROP in ('clean', 'studio', 'plane', 'none'):
         if _reuse is not None:
             _mat = _reuse.copy()
             _mat.name = 'Backdrop_grass'
+            # ★ B07：复用的 MCprep 材质多半用 Generated/Box 投影，不吃我们铺好的
+            #   0..size UV → 平地上贴图被拉成一整片渐变，看不出方块（clean 档实测）。
+            #   这里把贴图节点的 Vector 强行接到 UVMap，恢复「一格一 tile」。
+            try:
+                _nt2 = _mat.node_tree
+                _texs = [n for n in _nt2.nodes
+                         if n.type == 'TEX_IMAGE'
+                         and (getattr(n, 'image', None) is not None
+                              and 'grass_block_top' in n.image.name.lower())]
+                if _texs:
+                    _uvn = next((n for n in _nt2.nodes
+                                 if n.type == 'UVMAP'), None)
+                    if _uvn is None:
+                        _uvn = _nt2.nodes.new('ShaderNodeUVMap')
+                        _uvn.uv_map = 'UVMap'
+                    for _t in _texs:
+                        for _lk in list(_t.inputs['Vector'].links):
+                            _nt2.links.remove(_lk)
+                        _nt2.links.new(_uvn.outputs['UV'], _t.inputs['Vector'])
+                        _t.extension = 'REPEAT'
+                        _t.interpolation = 'Closest'
+                    p(f"    地面复用草地材质「{_reuse.name}」，{len(_texs)} 个贴图节点改接 UVMap")
+                else:
+                    p(f"    地面复用导出地形里的草地材质「{_reuse.name}」（没找到贴图节点，按原样）")
+            except Exception as _e:
+                p(f"    ⚠️ 复用材质改接 UV 失败（{_e}），按原样使用")
             _me.materials.append(_mat)
-            p(f"    地面复用导出地形里的草地材质「{_reuse.name}」")
             return _ob
         _mat = bpy.data.materials.new('Backdrop')
         _mat.use_nodes = True
@@ -611,7 +662,13 @@ if BACKDROP in ('clean', 'studio', 'plane', 'none'):
         _out = _nt.nodes.new('ShaderNodeOutputMaterial')
         _bsdf = _nt.nodes.new('ShaderNodeBsdfPrincipled')
         _bsdf.inputs['Roughness'].default_value = 0.92
+        # ★ B07：clean 档下 textured 往往是关的（不导入地形贴图），但这张草地
+        #   贴图通常还躺在 bpy.data.images 里（导入地形时载入过），顺手拿过来用；
+        #   拿不到才退回纯色。
         _img = _find_image('grass_block_top') if textured else None
+        if _img is None:
+            _img = next((i for i in bpy.data.images
+                         if 'grass_block_top' in (i.name or '').lower()), None)
         if _img is not None:
             _tex = _nt.nodes.new('ShaderNodeTexImage')
             _tex.image = _img
@@ -910,9 +967,16 @@ if SKIN:
 # ★ 3D 皮肤外层（0.5.8）
 #   把皮肤 outer layer 的不透明像素沿法线挤出，头发/帽子/衣服有厚度。
 #   默认关；DSH_SKIN3D=1 打开，DSH_SKIN3D_THICK 调厚度（格）。
+#
+#   ★ R06：这段【必须】等到「朝向搜索 + 定 yaw」之后才跑（见下面
+#   `_apply_skin3d_after_yaw()`）。实测它会把 head 包围盒重心带偏，
+#   而朝向搜索正是靠 face/head 包围盒算「面部→后脑」向量的 →
+#   开着 --skin3d 时搜索选了 114°（背面），关掉是 24°（正面）。
 # ============================================================
-_skin3d_on = (os.environ.get('DSH_SKIN3D') or '').strip().lower()
-if _skin3d_on not in ('', '0', 'off', 'false', 'no'):
+def _apply_skin3d_after_yaw():
+    _on = (os.environ.get('DSH_SKIN3D') or '').strip().lower()
+    if _on in ('', '0', 'off', 'false', 'no'):
+        return
     try:
         from skin3d import apply_skin3d
         _thick = float(os.environ.get('DSH_SKIN3D_THICK') or 0.02)
@@ -1038,6 +1102,11 @@ if arm:
                 _tgt_ang = max(0.0, min(90.0, _tgt_ang))
                 YAW = min(_cands, key=lambda t: abs(t[1][0] - _tgt_ang))[0]
                 _after = _facing_probe(YAW)
+                # ★ B05：把 _probe 更新成「搜完之后」的量测值。
+                #   以前 _probe 一直停留在搜索【之前】的 yaw 上，
+                #   写进 _subject_box.json 的 facing_deg 是错的（实测填 135°，
+                #   但成图明明是 3/4 正面），审图交叉校验被它带偏。
+                _probe = _after
                 p(f"    ★ 朝向搜索：yaw {YAW:.0f}°  夹角 {_after[0]:.0f}° → "
                   f"{_after[1]}（相机方位 {CAM_AZ:.0f}°，太阳 {SUN_ROT:.0f}°，"
                   f"扫了 {len(_cands)} 个候选）")
@@ -1046,6 +1115,25 @@ if arm:
     _YAW_DELTA = YAW - _yaw_orig   # 自带模型跟着角色一起对镜头
     arm.rotation_euler = (0, 0, math.radians(YAW))
 bpy.context.view_layer.update()
+
+# ★ R06：3D 皮肤外层放在定朝向之后（见上面 _apply_skin3d_after_yaw 的注释）。
+_apply_skin3d_after_yaw()
+bpy.context.view_layer.update()
+
+# ★ R06：把「实际生效」的机位写一份，pipeline 会用它覆盖 params ——
+#   以前报告里永远是入参 yaw=25°，而搜索可能把它改成 114°。
+try:
+    with open(os.path.join(OUT, '_final_params.json'), 'w',
+              encoding='utf-8') as _f:
+        json.dump({'yaw': round(float(YAW), 1), 'cam_az': round(float(CAM_AZ), 1),
+                   'dist': round(float(DIST), 2),
+                   'skin3d': (os.environ.get('DSH_SKIN3D') or '').strip().lower()
+                             not in ('', '0', 'off', 'false', 'no'),
+                   'pose': (os.environ.get('DSH_POSE') or 'action').lower(),
+                   'face': (os.environ.get('DSH_FACE') or 'auto').lower()},
+                  _f, ensure_ascii=False, indent=2)
+except Exception as _e:
+    p(f"    !! _final_params.json 没写成（{type(_e).__name__}）")
 
 # ============================================================
 # ★ 右臂握剑姿势（0.2.0 新增）
@@ -3534,6 +3622,66 @@ def project_subject_box():
     return box, raw, notes
 
 
+# ★ B07（延迟补贴图）：clean 档的地面平面是在导入地形【之前】建的，那时
+#   bpy.data.images 里还没有 grass_block_top.png（贴图随地形导入才载入），
+#   所以当场取不到图、只能退回纯色 → 地面一片平滑渐变，看不出方块。
+#   地形导完之后在这里补一次：贴图 Vector 不接 = 走 UVMap = 一格一 tile。
+try:
+    _bd_objs = [o for o in bpy.data.objects
+                if o.type == 'MESH' and o.name.lower().startswith('backdrop')]
+    for _bo in _bd_objs:
+        for _m in (getattr(_bo.data, 'materials', None) or []):
+            if _m is None or not _m.use_nodes:
+                continue
+            _nt3 = _m.node_tree
+            _tex_nodes = [n for n in _nt3.nodes if n.type == 'TEX_IMAGE']
+            if any(n.image is not None for n in _tex_nodes):
+                continue        # 已经有带图的贴图节点，别重复加
+            _img3 = None
+            for _im in bpy.data.images:
+                if 'grass_block_top' in (_im.name or '').lower():
+                    _img3 = _im
+                    break
+            if _img3 is None:
+                continue
+            if _tex_nodes:
+                # 建平面时那个 TEX_IMAGE 节点挂的是 None（当时图还没载入），
+                # 直接补上图即可；但当时走的是「纯色」分支，MIX→Base Color
+                # 那根线根本没连，这里必须补上，否则贴图挂了也不参与着色。
+                _t3 = _tex_nodes[0]
+                _t3.image = _img3
+                _t3.extension = 'REPEAT'
+                _t3.interpolation = 'Closest'
+                _bs3 = next((n for n in _nt3.nodes
+                             if n.type == 'BSDF_PRINCIPLED'), None)
+                _mx3 = next((n for n in _nt3.nodes if n.type == 'MIX_RGB'), None)
+                if _mx3 is None:
+                    _mx3 = _nt3.nodes.new('ShaderNodeMixRGB')
+                    _mx3.blend_type = 'MULTIPLY'
+                    _mx3.inputs['Fac'].default_value = 1.0
+                    _nt3.links.new(_t3.outputs['Color'], _mx3.inputs['Color1'])
+                    _mx3.inputs['Color2'].default_value = (0.42, 0.70, 0.28, 1.0)
+                if _bs3 is not None:
+                    _nt3.links.new(_mx3.outputs['Color'], _bs3.inputs['Base Color'])
+                p(f"    地面：延迟补上草地贴图（{_bo.name}，1 格 1 tile）")
+                continue
+            _bs = next((n for n in _nt3.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+            if _bs is None:
+                continue
+            _t3 = _nt3.nodes.new('ShaderNodeTexImage')
+            _t3.image = _img3
+            _t3.extension = 'REPEAT'
+            _t3.interpolation = 'Closest'
+            _mx = _nt3.nodes.new('ShaderNodeMixRGB')
+            _mx.blend_type = 'MULTIPLY'
+            _mx.inputs['Fac'].default_value = 1.0
+            _nt3.links.new(_t3.outputs['Color'], _mx.inputs['Color1'])
+            _mx.inputs['Color2'].default_value = (0.42, 0.70, 0.28, 1.0)
+            _nt3.links.new(_mx.outputs['Color'], _bs.inputs['Base Color'])
+            p(f"    地面：延迟补上草地贴图（{_bo.name}，1 格 1 tile）")
+except Exception as _e:
+    p(f"    ⚠️ 地面延迟补贴图失败（{_e}）")
+
 _subject_box = None
 _subject_raw = None
 _subject_notes = []
@@ -3562,6 +3710,14 @@ try:
         json.dump({'subject_box': _subject_box, 'raw': _subject_raw,
                    'head_box': _head_box, 'head_notes': _head_notes,
                    'size': [RES_X, RES_Y],
+                   # ★ B05 修复：把几何朝向一并交给审图。
+                   #   审图靠「头部皮肤色占比」判正/背面，对脸不是肤色的皮肤
+                   #   （紫发白袍、金发、面具）会误判成背面。几何这里有真值，
+                   #   让审图拿它做交叉校验，而不是各说各话。
+                   'facing_deg': (round(float(_probe[0]), 1)
+                                  if ('_probe' in globals() and _probe) else None),
+                   'yaw': round(float(YAW), 1),
+                   'cam_az': round(float(CAM_AZ), 1),
                    'source': 'world_to_camera_view(body eval_bbox)',
                    'notes': _subject_notes}, f, ensure_ascii=False, indent=2)
 except Exception as e:
@@ -3601,6 +3757,11 @@ def _emit_box_json(directory, rx, ry):
         with open(os.path.join(directory, '_subject_box.json'), 'w', encoding='utf-8') as f:
             json.dump({'subject_box': box, 'raw': raw, 'head_box': hb,
                        'head_notes': hnotes, 'size': [int(rx), int(ry)],
+                       # ★ B05：几何朝向（度）一并写下去，供审图交叉校验
+                       'facing_deg': (round(float(_probe[0]), 1)
+                                      if ('_probe' in globals() and _probe) else None),
+                       'yaw': round(float(YAW), 1),
+                       'cam_az': round(float(CAM_AZ), 1),
                        'source': 'world_to_camera_view(body eval_bbox)',
                        'notes': notes}, f, ensure_ascii=False, indent=2)
     except Exception as e:

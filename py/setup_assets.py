@@ -33,10 +33,29 @@ import sys
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _default_vendor():
+    """vendor 目录的默认位置（★ B12 修复）。
+
+    优先用插件自己的 vendor/；如果那份不存在（典型情形：装成 npm 包，
+    重装时整个目录被换掉、vendor/ 没跟过来），退到用户数据目录下的
+    ~/.dsh/blender-mc/vendor —— setup 装配过一次之后那里就有素材，
+    不至于因为装了个新版本就「全套素材丢失」。
+    """
+    local = os.path.join(os.path.dirname(HERE), 'vendor')
+    if os.path.isdir(local):
+        return local
+    home = os.environ.get('DSH_HOME') or os.path.join(
+        os.path.expanduser('~'), '.dsh')
+    shared = os.path.join(home, 'blender-mc', 'vendor')
+    return shared if os.path.isdir(shared) else local
+
+
 # 装配产物的存放处。默认放插件自己的 vendor/；
 # 用 DSH_MC_VENDOR 可以指到别处 —— 装成 npm 包时插件目录会被重装覆盖，
 # 把 vendor/ 放到稳定的地方才不会被冲掉。
-VENDOR = os.environ.get('DSH_MC_VENDOR') or os.path.join(os.path.dirname(HERE), 'vendor')
+VENDOR = os.environ.get('DSH_MC_VENDOR') or _default_vendor()
 
 # 每项资产：目标相对路径、认文件名用的关键词、必需的候选名、说明
 WANTED = {

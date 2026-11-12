@@ -119,10 +119,29 @@ def _read_json(path, default):
 
 
 def _write_json(path, obj):
+    """写 json；写不进去翻译成可操作的中文错误，而不是让 PermissionError 冒泡。
+
+    ★ R02 修复：以前 OSError 一路冒到 _run 的兜底，用户看到的是
+      「Python traceback + 错误 map.internal：PermissionError」。
+    """
     tmp = '%s.tmp-%d' % (path, os.getpid())
-    with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except OSError as exc:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        raise MapError(
+            'map.no-permission',
+            '写不进地图库：%s（%s）\n'
+            '把目录 %s 加进可写范围，或设 DSH_HOME 指向可写目录后重试。'
+            % (path, getattr(exc, 'strerror', None) or exc,
+               os.path.dirname(path)),
+            status=403) from None
 
 
 def _sha256_file(path, chunk=4 * MIB):
@@ -775,6 +794,36 @@ def get_map(map_id, root=None):
     return dto(meta)
 
 
+def find_by_ref(ref, root=None):
+    """把「id / 名字 / 唯一前缀」解析成 map id。
+
+    ★ R02 附带：以前只有一个 `--id`，`map resolve 新的世界` 会被 argparse
+      直接判成「unrecognized arguments」。名字恰恰是人记得住的那个键。
+    """
+    ref = (ref or '').strip()
+    if not ref:
+        raise MapError('map.no-id',
+                       '要给地图 id 或名字（先 map list 看一眼）', status=400)
+    root = root or default_root()
+    idx = read_index(root)
+    maps = idx.get('maps') or {}
+    if ref in maps:
+        return ref
+    same = [k for k, m in maps.items() if (m.get('name') or '') == ref]
+    if len(same) == 1:
+        return same[0]
+    part = [k for k, m in maps.items() if ref in (m.get('name') or '')]
+    if len(part) == 1:
+        return part[0]
+    if not part and not same:
+        raise MapError('map.not-found',
+                       '找不到地图：%s（map list 看现有 id/名字）' % ref, status=404)
+    hits = same or part
+    raise MapError('map.ambiguous',
+                   '「%s」匹配到 %d 张：%s —— 请用 id 指定'
+                   % (ref, len(hits), '、'.join(hits)), status=409)
+
+
 def resolve_world(map_id, root=None):
     """map id → 存档目录绝对路径（给 mc_shoot/mc_scan 用）。"""
     root = root or default_root()
@@ -1155,11 +1204,16 @@ def _run(fn, as_json, **kw):
     except MapError as exc:
         return _emit({'ok': False, 'error': exc.body()}, as_json)
     except Exception as exc:  # noqa: BLE001
-        import traceback
-        traceback.print_exc()
-        return _emit({'ok': False, 'error': {'code': 'map.internal',
-                                             'message': '%s: %s' % (type(exc).__name__, exc),
-                                             'params': {}}}, as_json)
+        # ★ R02：默认只给一行人话，栈留给 DSH_DEBUG=1（以前无条件 print_exc，
+        #   连「目录没权限」这种可预期错误也会糊一屏 traceback）。
+        if os.environ.get('DSH_DEBUG'):
+            import traceback
+            traceback.print_exc()
+        return _emit({'ok': False, 'error': {
+            'code': 'map.internal',
+            'message': '%s: %s（设 DSH_DEBUG=1 看完整栈）'
+                       % (type(exc).__name__, exc),
+            'params': {}}}, as_json)
 
 
 def main(argv=None):
@@ -1177,6 +1231,8 @@ def main(argv=None):
     ap.add_argument('--name', default=None)
     ap.add_argument('--sha256', default=None)
     ap.add_argument('--json', action='store_true')
+    ap.add_argument('ref', nargs='?', default=None,
+                    help='地图 id 或名字（resolve/get/rename/delete/default 用）')
     a = ap.parse_args(argv)
 
     if a.job:
@@ -1206,17 +1262,25 @@ def main(argv=None):
         return _run(import_local, a.json, path=a.path, name=a.name, root=root)
     if a.action == 'list':
         return _run(list_maps, a.json, root=root)
+
+    # ★ R02 附带：这些动作都吃一个「地图引用」，允许 --id、地址参数或名字。
+    ref = a.id or a.ref
+    if a.action in ('get', 'resolve', 'rename', 'delete', 'default') and ref:
+        try:
+            ref = find_by_ref(ref, root=root)
+        except MapError as exc:
+            return _emit({'ok': False, 'error': exc.body()}, a.json)
     if a.action == 'get':
-        return _run(get_map, a.json, map_id=a.id, root=root)
+        return _run(get_map, a.json, map_id=ref, root=root)
     if a.action == 'resolve':
         return _run(lambda **kw: dict(zip(('savePath', 'meta'), resolve_world(**kw))),
-                    a.json, map_id=a.id, root=root)
+                    a.json, map_id=ref, root=root)
     if a.action == 'rename':
-        return _run(rename_map, a.json, map_id=a.id, name=a.name, root=root)
+        return _run(rename_map, a.json, map_id=ref, name=a.name, root=root)
     if a.action == 'delete':
-        return _run(delete_map, a.json, map_id=a.id, root=root)
+        return _run(delete_map, a.json, map_id=ref, root=root)
     if a.action == 'default':
-        return _run(set_default, a.json, map_id=a.id, root=root)
+        return _run(set_default, a.json, map_id=ref, root=root)
     if a.action == 'doctor':
         return _run(doctor, a.json, root=root)
     return 1

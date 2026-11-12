@@ -957,6 +957,27 @@ def build_camera(ctx, cam, mo, override=None):
     ov['d_scale'] = float(ov.get('d_scale', 1.0)) * (1.0 + _fenv('DSH_ANIM_CAM_D_SCALE_ADD'))
     ov['lens_scale'] = float(ov.get('lens_scale', 1.0)) * (1.0 + _fenv('DSH_ANIM_CAM_LENS_SCALE_ADD'))
     az = offset_track(cam['az'], ov.get('az_add', 0.0))
+    # ★ R08 朝向守卫：本 rig 的 camera.az 与「看得见正脸」不是差 180° 而是差 266°
+    #   ——这个数是从渲染实测扫出来的（cast：cam 196° 侧后方、cam 286° 正脸），
+    #   不是推导出来的；几何量（眼骨质心−头中心）在本 rig 上给出相反的结论，
+    #   所以别用几何式替代它。只对「情绪族」配方生效，跟拍/位移类本来就在身后。
+    try:
+        _spec = ctx.get('spec') or {}
+        _motion = _spec.get('motion') or {}
+        _char_az = _motion.get('az')
+        _name = _spec.get('name') or ''
+        # dl01–dl03 是「对白」：机位本来就该在侧前方跟拍对话，不算背对，
+        # 所以不进白名单（否则每次渲对白都刷一条无意义警告）。
+        _FACING = ('cast', 'block', 'taunt', 'idle_shift', 'land', 'fall')
+        if _char_az is not None and _name in _FACING:
+            _d = (float(az[0][1]) - float(_char_az)) % 360.0
+            _off = abs(((_d - 266.0 + 180.0) % 360.0) - 180.0)   # 离 266° 多远
+            if _off > 45.0:
+                print('⚠️  朝向守卫：camera.az %.0f° 与 motion.az %.0f° 相差 %.0f°，'
+                      '离实测正脸位（char+266°）偏 %.0f° —— 大概率看不到脸。配方：%s'
+                      % (float(az[0][1]), float(_char_az), _d, _off, _name or '?'))
+    except Exception:
+        pass
     dist = scale_track(cam['dist'], ov.get('d_scale', 1.0))
     lens = scale_track(cam['lens'], ov.get('lens_scale', 1.0))
     rise = [(f, max(0.0, min(1.0, v + ov.get('rise_add', 0.0))))
@@ -1153,6 +1174,14 @@ def clean_stage(ctx, spec):
         spec['hide_world'] = False
         spec['ground'] = None
         spec['hide_held'] = False
+    if os.environ.get('DSH_ANIM_HIDE_WORLD') == '1':
+        spec = dict(spec)
+        spec['hide_world'] = True
+    # ★ B06 修复：缺省值从 True 改成 False。
+    #   以前规格里没写 hide_world 就默默把整张地形删掉，渲出来是
+    #   灰底/黑底（fall 那支背景全黑就是这么来的）。现在默认保留地形，
+    #   要棚拍必须在配方里显式写 "hide_world": true。
+    _hide_world = spec.get('hide_world', False)
     frags = [str(s).lower() for s in (spec.get('hide') or [])]
     hidden = 0
     for ob in list(bpy.data.objects):
@@ -1163,7 +1192,7 @@ def clean_stage(ctx, spec):
             ob.hide_render = True
             hidden += 1
             continue
-        if spec.get('hide_world', True):
+        if _hide_world:
             try:
                 if max(ob.dimensions) > 50.0:
                     ob.hide_render = True
@@ -1212,7 +1241,9 @@ def clean_stage(ctx, spec):
         ob.location = mu.Vector((base.x, base.y, base.z - 0.002 + za))
         ob.scale = mu.Vector((size * 0.5, size * 0.5, 1.0))
         ob.data.materials.append(mat)
-    p('    隐藏 %d 个网格%s' % (hidden, '、铺了棋盘地面' if g else ''))
+    p('    地形：%s；隐藏 %d 个网格%s'
+      % ('隐藏（棚拍档）' if _hide_world else '保留（要棚拍在配方里写 hide_world:true）',
+         hidden, '、铺了棋盘地面' if g else ''))
 
 
 def setup_render(ctx, r, out_dir):
@@ -1306,6 +1337,147 @@ def setup_render(ctx, r, out_dir):
     p('    %s / %d 采样 / %s / %d 帧 @ %dfps / %s'
       % (sc.render.engine, samples, res, ctx['total'], ctx['fps'], vt))
     return {'engine': sc.render.engine, 'res': res, 'samples': samples, 'vt': vt}
+
+
+# ═══════════════════════════════════════════════════════════════
+# 8b. 时间 / 雾（film 逐镜头覆盖）
+# ═══════════════════════════════════════════════════════════════
+def _sun_for_hour(hour):
+    """把 0..24 的小时数换算成 (仰角°, 颜色 RGB, 灯光能量)。
+
+    ★ 与 build_cover.py 的 DSH_HOUR 公式保持一致（同样的 62°·sin），否则
+      「建场景时是 18 点、动画里又按另一套公式摆一次」，两套值会互相打架。
+
+    ★ R05 修复：旧版 `day = elev > 2.0`，而 elev = 62·sin(π(h-6)/12) 在
+      h=6 与 h=18 恰好是 0 → 黎明和黄昏都落进「夜里」（月光 1.2W / 冷蓝），
+      实测两镜成片亮度 V 0.686 vs 0.694、色相 79.5 vs 78.5，肉眼同色。
+      现在改成【连续日光因子】k：仰角 -6°→+8° 之间平滑过渡，不再有硬阈值。
+    """
+    import math as _m
+    h = float(hour) % 24.0
+    elev = 62.0 * _m.sin(_m.pi * (h - 6.0) / 12.0)
+    k = max(0.0, min(1.0, (elev + 6.0) / 14.0))   # 0=纯夜 1=正午
+    night_col = (0.55, 0.68, 1.0)
+    if k <= 0.0:
+        return max(-8.0, elev), night_col, 1.2
+    day_e = 6.0 * min(1.0, max(0.0, elev / 30.0 + 0.25))
+    warm = max(0.0, min(1.0, (30.0 - elev) / 30.0))
+    day_col = (1.0, 0.70 + 0.25 * (1.0 - warm), 0.42 + 0.45 * (1.0 - warm))
+    col = tuple(night_col[i] + (day_col[i] - night_col[i]) * k for i in range(3))
+    # ★ R05 第二半：6 点与 18 点仰角都是 0°，光靠仰角永远分不开。
+    #   现实里区分黎明/黄昏靠的是色温（晨光偏冷粉、夕照偏橙红），
+    #   所以按「离 12 点多远 + 是否过了 12 点」补一档色偏。
+    _low = max(0.0, 1.0 - elev / 22.0)           # 越低越强
+    if _low > 0.0:
+        if h < 12.0:
+            _tint = (0.98, 0.86, 0.92)            # 晨：冷粉
+        else:
+            _tint = (1.00, 0.66, 0.44)            # 昏：橙红
+        _w = 0.55 * _low
+        col = tuple(col[i] * (1.0 - _w) + _tint[i] * _w for i in range(3))
+    energy = max(0.02, 1.2 + (day_e - 1.2) * k)
+    return max(-8.0, elev), col, energy
+
+
+def apply_time_and_fog(p=print):
+    """★ B02 修复：让 DSH_HOUR / DSH_FOG 在【逐帧渲染】这条路上真的生效。
+
+    以前 film.py 把 hour/fog 塞进 env，但只有 build_cover.py 建场景时
+    读一次；而 anim/film 是在已经烘好的 .blend 上渲帧，世界和灯早定死了，
+    于是「每镜不同时间/雾」静默无效。这里在渲染前重新摆一次太阳和雾。
+    """
+    hour_s = os.environ.get('DSH_HOUR')
+    fog_s = os.environ.get('DSH_FOG')
+    import math as _m
+    if hour_s not in (None, ''):
+        try:
+            hour = float(hour_s)
+        except ValueError:
+            p('    !! DSH_HOUR 不是数字: %r（忽略）' % hour_s)
+            hour = None
+        if hour is not None:
+            # 工程本来就是按这个时刻建的 → 不用重复摆灯（build_cover 已摆好）
+            try:
+                _built = float(bpy.context.scene.get('dsh_hour', -1.0))
+            except Exception:
+                _built = -1.0
+            if _built >= 0 and abs(_built - hour) < 0.01:
+                p('    🕒 时间 %g 点（与封面工程一致，沿用已烘好的灯）' % hour)
+                hour = None
+        if hour is not None:
+            elev, col, energy = _sun_for_hour(hour)
+            touched = 0
+            for ob in bpy.data.objects:
+                if ob.type != 'LIGHT':
+                    continue
+                ld = ob.data
+                if ld.type != 'SUN':
+                    continue
+                e = ob.rotation_euler
+                e.x = _m.radians(90.0 - elev)
+                ob.rotation_euler = e
+                ld.color = col
+                ld.energy = max(0.02, energy)
+                touched += 1
+            p('    🕒 时间 %g 点 → 太阳仰角 %.1f° 色 (%.2f,%.2f,%.2f) 能量 %.2fW（%d 盏）'
+              % (hour, elev, col[0], col[1], col[2], energy, touched))
+            # ★ R05 第三半：只改太阳改不动画面 —— 场景亮度主要来自天光，
+            #   实测 6 点与 18 点成片 RGB 几乎逐通道相同（134.9/152.0/135.3
+            #   vs 138.4/154.9/138.7）。所以这里连世界背景一起调：
+            #   黄昏压暗 + 暖偏，清晨稍亮 + 冷粉，正午不动。
+            try:
+                _w = bpy.context.scene.world
+                _bg = None
+                if _w and _w.use_nodes:
+                    for _n in _w.node_tree.nodes:
+                        if _n.type == 'BACKGROUND':
+                            _bg = _n
+                            break
+                if _bg is not None:
+                    _base = bpy.context.scene.get('dsh_sky_base')
+                    if _base is None:
+                        _base = float(_bg.inputs['Strength'].default_value)
+                        bpy.context.scene['dsh_sky_base'] = _base
+                    _base = float(_base)
+                    if 7.0 <= hour <= 17.0:
+                        _f, _tint, _tw = 1.0, (1.0, 1.0, 1.0), 0.0
+                    elif hour < 12.0:
+                        _f, _tint, _tw = 0.85, (0.92, 0.95, 1.05), 0.30
+                    else:
+                        _f, _tint, _tw = 0.55, (1.15, 0.88, 0.70), 0.40
+                    _bg.inputs['Strength'].default_value = max(0.02, _base * _f)
+                    _bg.inputs['Color'].default_value = (
+                        (1.0 - _tw) + _tint[0] * _tw,
+                        (1.0 - _tw) + _tint[1] * _tw,
+                        (1.0 - _tw) + _tint[2] * _tw, 1.0)
+                    p('    🌅 天光 ×%.2f 色偏 (%.2f,%.2f,%.2f)'
+                      % (_f, _tint[0], _tint[1], _tint[2]))
+            except Exception as _e:
+                p('    !! 天光调整失败(%s)' % type(_e).__name__)
+    if fog_s not in (None, ''):
+        try:
+            fog = float(fog_s)
+        except ValueError:
+            p('    !! DSH_FOG 不是数字: %r（忽略）' % fog_s)
+            fog = None
+        if fog is not None:
+            n = 0
+            for ob in bpy.data.objects:
+                if not ob.name.startswith('FogVolume'):
+                    continue
+                ob.hide_render = False
+                ob.hide_viewport = False
+                for ms in getattr(ob.data, 'materials', []) or []:
+                    nt = getattr(ms, 'node_tree', None)
+                    if not nt:
+                        continue
+                    for nd in nt.nodes:
+                        if nd.type == 'PRINCIPLED_VOLUME':
+                            nd.inputs['Density'].default_value = \
+                                0.0012 * max(0.0, fog)
+                            n += 1
+            p('    🌫 雾倍率 %g → 密度 %.5f（%d 个节点）'
+              % (fog, 0.0012 * max(0.0, fog), n))
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1405,6 +1577,9 @@ def build(recipe, out_dir, total=None, fps=None):
     build_total = total
     fps = int(fps or recipe.get('fps', 24))
     ctx = scene_ctx(total, fps)
+    # 配方本身挂进 ctx：朝向守卫（R08）要对比 motion.az 与 camera.az，
+    # 下面 build_camera 只拿到 camera 段，看不到角色朝哪走。
+    ctx['spec'] = recipe
     mo_spec = recipe.get('motion') or {'type': 'fly'}
 
     # 坐骑：先把坐骑摆好，再按它的背高把骑手整体抬起来 ——
@@ -1592,6 +1767,9 @@ def build(recipe, out_dir, total=None, fps=None):
                      _ob.matrix_world.translation.x, _ob.matrix_world.translation.y,
                      _ob.matrix_world.translation.z,
                      tuple(round(v, 2) for v in _ob.dimensions), _ob.hide_render))
+
+    # ⑥c 时间 / 雾（film 逐镜头覆盖靠这两个 env；B02 修复）
+    apply_time_and_fog(p)
 
     # ⑦ 渲染设置
     p('\n[7] 渲染设置')

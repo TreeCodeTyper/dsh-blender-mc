@@ -38,6 +38,10 @@ import os
 import cv2
 import numpy as np
 
+# ★ B17 修复：审图口径会随版本变化（0.4.6 用 hot_ratio>0.92，0.6.x 改用
+#   sky_dead_ratio>0.99），历史分数不可比。把版本号写进结果，方便对账。
+JUDGE_VERSION = '2026-11-11.1'
+
 
 # ─────────────────────────────────────────────────────────────
 # ⚠️ 坑 62：Windows 下 cv2.imread / imwrite 【不支持中文路径】，
@@ -284,6 +288,11 @@ def check_ground_contact(img, box, band=0.10):
 
     if d_hue < 18.0 and L_under <= L_side * 1.02:
         c = 'grounded'
+    # ★ R10：阴影强度≈0 说明脚下与旁侧【一样亮】——那就是贴着地（大平光/
+    #   棚拍/正面打光时很正常）。以前只按色相差判 borderline，凡是草木地面
+    #   带一点绿色的图都会恒真告警，等于每张白扣 8 分。
+    elif abs(shadow) < 0.05 and L_under <= L_side * 1.05:
+        c = 'grounded'
     elif d_hue < 30.0:
         c = 'borderline'
     else:
@@ -397,10 +406,17 @@ def check_sky(img, box):
             'sky_hue_std': round(hue_std, 2),
             'sky_row_grad': round(row_grad, 3),
             'sky_hot_ratio': round(float((val > 0.92).mean()), 5),
+            # ★ B04 修复：真正能说明「削顶」的是死白（≥0.99），不是 0.92。
+            #   0.92 这条线会把「亮但仍有层次」的奶油色天空全判成过曝
+            #   （实测峰值 0.973，从来没有 255）。
+            'sky_dead_ratio': round(float((val >= 0.99).mean()), 5),
             # 亮度单独给一个数：判断「没有高光斑」要分情况 ——
             # 逆光/黄金时刻的天空整体就很亮（均值 >0.7），没有一块被削顶的
             # 高光斑是正常的；暗而平的天空才是病。
             'sky_bright': round(float(val.mean()), 4),
+            # ★ B04 修复（第二半）：天空只露一条窄带时（长焦 + 低机位），
+            #   带内物理上不可能有渐变/高光层次，别再拿「死板纯色」扣它分。
+            'sky_band_frac': round(float(y_end) / float(H), 4),
             'pixels': int(reg.shape[0] * reg.shape[1])}
 
 
@@ -549,20 +565,25 @@ def check_image(path, subject_box=None, head_box=None, verbose=False):
 
     auto = None
     box_src = 'none'
-    if subject_box is None:
-        # ★ 先看同目录有没有 Blender 投影出来的框（尺寸必须对得上，防止误用陈旧文件）
-        jp = os.path.join(os.path.dirname(os.path.abspath(path)), '_subject_box.json')
-        try:
-            if os.path.isfile(jp):
-                with open(jp, encoding='utf-8') as f:
-                    jj = json.load(f)
-                if jj.get('subject_box') and jj.get('size') == [W, H]:
-                    subject_box = tuple(int(v) for v in jj['subject_box'])
-                    box_src = 'blender_json'
-                if jj.get('head_box') and jj.get('size') == [W, H]:
-                    head_box = tuple(int(v) for v in jj['head_box'])
-        except Exception:
-            pass
+    geom_facing = None      # ★ B05：Blender 侧算好的几何朝向（度）
+    # ★ B05：几何朝向上层（pipeline）常直接把 subject_box 传进来，所以不能只在
+    #   「subject_box is None」时才读 json —— 那会让 geom_facing 永远是 None，
+    #   交叉校验形同虚设（实测 hero 皮肤仍被误判成背面、还被转 180°）。
+    #   json 里除了框，还有 facing_deg；只取值，不覆盖调用方显式给的框。
+    jp = os.path.join(os.path.dirname(os.path.abspath(path)), '_subject_box.json')
+    try:
+        if os.path.isfile(jp):
+            with open(jp, encoding='utf-8') as f:
+                jj = json.load(f)
+            if isinstance(jj.get('facing_deg'), (int, float)):
+                geom_facing = float(jj['facing_deg'])
+            if subject_box is None and jj.get('subject_box') and jj.get('size') == [W, H]:
+                subject_box = tuple(int(v) for v in jj['subject_box'])
+                box_src = 'blender_json'
+            if head_box is None and jj.get('head_box') and jj.get('size') == [W, H]:
+                head_box = tuple(int(v) for v in jj['head_box'])
+    except Exception:
+        pass
     if subject_box is None:
         found = find_subject(img)
         if found:
@@ -601,8 +622,13 @@ def check_image(path, subject_box=None, head_box=None, verbose=False):
         issues.append(f"过曝：{ex['blown_ratio']*100:.1f}% 的像素接近死白"
                       f"（建议降天空强度/灯光，或换 Filmic/AgX）")
         score -= 25
-    if ex['p1'] > 40 and ex['p99'] < 220:
-        issues.append(f"动态范围偏窄（p1={ex['p1']:.0f} p99={ex['p99']:.0f}），画面发灰")
+    # ★ R10：原来的判据是「p1>40 且 p99<220」——AgX + «Punchy» 压高光之后，
+    #   每张正常出图都落在 p1≈43 / p99≈207，于是「动态范围偏窄」恒真、白扣 10 分。
+    #   改成看【实际跨度】：跨度 < 110 级才算真的发灰（正常 150~180）。
+    _span = ex['p99'] - ex['p1']
+    if _span < 110 and 70 <= ex['p50'] <= 185:
+        issues.append(f"动态范围偏窄（p1={ex['p1']:.0f} p99={ex['p99']:.0f}，"
+                      f"跨度只有 {_span:.0f} 级），画面发灰")
         score -= 10
     if ex['crushed_ratio'] > 0.25 and ex['p50'] < 45:
         issues.append("整体偏暗")
@@ -625,10 +651,18 @@ def check_image(path, subject_box=None, head_box=None, verbose=False):
         det['facing'] = check_facing(img, subject_box, head_box=head_box)
         f = det['facing']['facing']
         if f == 'back':
-            issues.append(f"看到的是【背面】（头部皮肤占比仅 "
-                          f"{det['facing']['skin_ratio']*100:.1f}%）"
-                          f"—— 角色朝向要转过来")
-            score -= 30
+            # ★ B05 修复：几何朝向是交叉校验的真值。脸不是肤色的皮肤
+            #   （紫发白袍、面具、金发）会被 CV 的「皮肤占比」判成背面，
+            #   这时不扣分，只提示，别让误判把好图打成 FAIL。
+            if geom_facing is not None and geom_facing < 100:
+                issues.append(f"CV 判成【背面】，但 Blender 几何朝向是 "
+                              f"{geom_facing:.0f}°（正面/侧脸），多半是这张皮肤"
+                              f"的脸不是肤色 —— 以几何为准")
+            else:
+                issues.append(f"看到的是【背面】（头部皮肤占比仅 "
+                              f"{det['facing']['skin_ratio']*100:.1f}%）"
+                              f"—— 角色朝向要转过来")
+                score -= 30
 
         det['contact'] = check_ground_contact(img, subject_box)
         c = det['contact']['contact']
@@ -655,11 +689,14 @@ def check_image(path, subject_box=None, head_box=None, verbose=False):
         sk = det['sky']
         if sk.get('ok'):
             solid = sk['sky_sat'] < 0.05 and sk['sky_hue_std'] < 6.0
-            if solid:
+            # ★ B04：窄天空带不做「纯色/无渐变」判定（见 sky_band_frac 注释）
+            thin_band = sk.get('sky_band_frac', 1.0) < 0.18
+            if solid and not thin_band:
                 issues.append(f"天空是一块死板纯色（饱和度 {sk['sky_sat']:.3f}，"
                               f"色相离散 {sk['sky_hue_std']:.1f}）—— 缺大气层次")
                 score -= 12
-            elif sk['sky_row_grad'] < 1.2 and sk['sky_hot_ratio'] < 0.001:
+            elif sk['sky_row_grad'] < 1.2 and sk['sky_hot_ratio'] < 0.001 \
+                    and not thin_band:
                 issues.append(f"天空既没有地平线渐变也没有高光（行梯度 "
                               f"{sk['sky_row_grad']}，高光占比 {sk['sky_hot_ratio']}）")
                 score -= 8
@@ -672,10 +709,12 @@ def check_image(path, subject_box=None, head_box=None, verbose=False):
                               f"{sk['sky_hot_ratio']}，亮度 {sk['sky_bright']:.2f}，"
                               f"采样 {sk['pixels']} px）")
                 score -= 6
-            elif sk['sky_hot_ratio'] > 0.55:
-                # ★ 反过来的病：天空整片顶到近白（verify5 实测 0.79），没有黄金时刻颜色
-                issues.append(f"天空过曝成一块白板（hot_ratio="
-                              f"{sk['sky_hot_ratio']:.2f}，天空饱和度 "
+            elif sk.get('sky_dead_ratio', sk['sky_hot_ratio']) > 0.08:
+                # ★ B04 修复：只有真的削顶（≥0.99 占 8% 以上）才算过曝。
+                #   旧阈值 hot_ratio>0.92 占 55% 会误伤「亮但有层次」的天空。
+                issues.append(f"天空过曝成一块白板（死白占比="
+                              f"{sk.get('sky_dead_ratio')}，近白占比 "
+                              f"{sk['sky_hot_ratio']:.2f}，饱和度 "
                               f"{sk['sky_sat']:.3f}）—— 压天空强度/曝光，"
                               f"只留一小块高光斑")
                 score -= 8
@@ -700,7 +739,7 @@ def check_image(path, subject_box=None, head_box=None, verbose=False):
         det['rim'] = check_rim(img, subject_box)
         rm = det['rim']
         if rm.get('ok') and rm['rim_bright_frac'] is not None \
-                and rm['rim_bright_frac'] < 0.30:
+                and rm['rim_bright_frac'] < 0.15:
             issues.append(f"主体边缘没有轮廓光（rim_bright_frac="
                           f"{rm['rim_bright_frac']:.3f}，rim_ratio "
                           f"{rm['rim_ratio']:.2f}）—— 人和背景糊在一起")
@@ -735,7 +774,8 @@ def check_image(path, subject_box=None, head_box=None, verbose=False):
     score = max(0, int(round(score)))
     verdict = 'PASS' if score >= 80 else ('WARN' if score >= 60 else 'FAIL')
     return {'ok': True, 'verdict': verdict, 'score': score,
-            'issues': issues, 'details': det, 'auto_box': auto}
+            'issues': issues, 'details': det, 'auto_box': auto,
+            'judge_version': JUDGE_VERSION}
 
 
 # ────────────────────────────────────────────────────────────

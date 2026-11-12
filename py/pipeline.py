@@ -139,6 +139,15 @@ def run(cmd, log=None, timeout=None, cwd=None, env=None):
         with open(log, 'a', encoding='utf-8') as f:
             f.write('\n$ ' + ' '.join(str(c) for c in cmd) + '\n')
             f.write(out)
+    # ★ R12：film 把整段输出重定向进 _build.log，终端一个字都看不到 ——
+    #   「🕒 时间 18 点 → …」「🌫 雾倍率」这类关键行就此消失，用户只能猜
+    #   hour/fog 有没有生效。这里把带标记的行挑出来重放到终端。
+    try:
+        for _ln in out.splitlines():
+            if any(_k in _ln for _k in ('🕒', '🌫', '🌅', '朝向守卫', '↻ 实际生效')):
+                print('  ' + _ln.strip())
+    except Exception:
+        pass
     return rc, out
 
 
@@ -211,25 +220,7 @@ def resolve_assets(config=None):
     except Exception:
         pass
 
-    # manifest 没记全（比如只记了贴图）→ 直接看 vendor 目录里实际有什么。
-    # 这条很关键：装配时写过 manifest 之后再手工补放素材，manifest 不会自己更新，
-    # 结果就是「素材明明在 vendor 里，插件却说没装」。
-    try:
-        import setup_assets as _sa
-        vdir = getattr(_sa, 'VENDOR', '')
-        if vdir and os.path.isdir(vdir):
-            if not out.get('rig'):
-                hits = sorted(glob.glob(os.path.join(vdir, 'rig', '*.blend')))
-                if hits:
-                    out['rig'] = hits[0]
-            if not out.get('item'):
-                cand = os.path.join(vdir, 'item')
-                if os.path.isdir(cand):
-                    out['item'] = cand
-    except Exception:
-        pass
-
-    # manifest 也没有 → 现场扫一遍（只扫默认位置，不递归太深）
+    # manifest 也没 → 现场扫一遍（只扫默认位置，不递归太深）
     missing = [k for k in ('rig', 'item') if not out.get(k)]
     if missing and WANTED:
         try:
@@ -325,6 +316,45 @@ def _obj_has_geometry(path):
         return False
 
 
+def _global_cache_dir():
+    """全局导出缓存目录（跨输出目录复用，见 B18）。"""
+    d = os.environ.get('DSH_MC_CACHE') or os.path.join(
+        os.path.expanduser('~'), '.dsh', 'blender-mc', 'cache', 'export')
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        return None
+    return d
+
+
+def _global_cache_key(key):
+    import hashlib
+    blob = json.dumps(key, sort_keys=True, ensure_ascii=False).encode('utf-8')
+    return hashlib.sha1(blob).hexdigest()[:16]
+
+
+def _global_cache_get(key):
+    d = _global_cache_dir()
+    if not d:
+        return None
+    p = os.path.join(d, _global_cache_key(key) + '.obj')
+    return p if os.path.isfile(p) and _obj_has_geometry(p) else None
+
+
+def _global_cache_put(key, obj):
+    d = _global_cache_dir()
+    if not d:
+        return
+    try:
+        dst = os.path.join(d, _global_cache_key(key) + '.obj')
+        shutil.copyfile(obj, dst)
+        with open(os.path.join(d, _global_cache_key(key) + '.json'), 'w',
+                  encoding='utf-8') as f:
+            json.dump(key, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
 def step_export(save, area, center, out_dir, blender=None, radius=44,
                 ymin=56, ymax=90, horizon=150, progress=print,
                 textures=None, force=False):
@@ -361,6 +391,23 @@ def step_export(save, area, center, out_dir, blender=None, radius=44,
         except Exception:
             pass
 
+    # ★ B18 修复：缓存改成「按内容键」+ 全局一份。
+    #   以前 _export_cache.json 只写在 out_dir 里，换个输出目录就必须重导
+    #   （实测 24s/次）。现在把 OBJ 也登记到全局缓存目录，命中就复制回来。
+    if not force:
+        g = _global_cache_get(key)
+        if g:
+            try:
+                shutil.copyfile(g, obj)
+                if _obj_has_geometry(obj):
+                    with open(cache_path, 'w', encoding='utf-8') as f:
+                        json.dump(key, f, ensure_ascii=False, indent=2)
+                    progress(f'    命中全局导出缓存（{os.path.basename(g)}）: {obj}')
+                    return obj
+                os.remove(obj)
+            except Exception:
+                pass
+
     tex = textures
     if not tex:
         try:
@@ -394,6 +441,7 @@ def step_export(save, area, center, out_dir, blender=None, radius=44,
             json.dump(key, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+    _global_cache_put(key, obj)
     progress(f'    导出完成: {obj}')
     return obj
 
@@ -739,7 +787,10 @@ def auto_adjust(params, report):
         #    与其白跑一轮，不如把这条留给人（改 hour / 加云 / 换 backdrop）。
 
     # 背面 → 转 180°
-    if '背面' in issues:
+    #   ★ B05：只在审图【真的】判成背面时才转。几何朝向与 CV 打架时，
+    #     vision_check 会把文案换成「CV 判成【背面】，但 Blender 几何朝向是…」，
+    #     那种情况再转 180° 就是把正面转成背面（实测 hero + 紫发白袍皮肤中招）。
+    if '看到的是【背面】' in issues:
         new['yaw'] = (params['yaw'] + 180.0) % 360.0
         fixes.append(f"角色朝向 {params['yaw']}° → {new['yaw']}°（转正面）")
 
@@ -941,6 +992,22 @@ def shoot(save, area, out_root, blender=None, params=None, center=None,
     final = history[-1]
     size = _png_size(final['png'])
     res_req = final['params'].get('res')
+    # ★ R06：以 Blender 实际生效的机位为准。朝向搜索可能把 yaw 从 25° 改成
+    #   114°，而 params 里一直是入参 —— 报告与实际不符比没报告更坑。
+    try:
+        _fp = os.path.join(os.path.dirname(os.path.abspath(final['png'])),
+                           '_final_params.json')
+        if os.path.isfile(_fp):
+            with open(_fp, encoding='utf-8') as _f:
+                _fin = json.load(_f)
+            for k in ('yaw', 'cam_az'):
+                if _fin.get(k) is not None and final['params'].get(k) != _fin[k]:
+                    progress(f'    ↻ 实际生效 {k}={_fin[k]}（入参 {final["params"].get(k)}）')
+                    final['params'][k] = _fin[k]
+            final['params']['pose_effective'] = _fin.get('pose')
+            final['params']['face_effective'] = _fin.get('face')
+    except Exception as _e:
+        progress(f'    ⚠️ 读 _final_params.json 失败: {_e}')
     res_actual = f'{size[0]}x{size[1]}' if size else None
     if size and res_req:
         want = str(res_req).lower().replace('×', 'x').replace(' ', '')
@@ -1011,6 +1078,23 @@ def _newest_blend(out_dir, since):
     return best
 
 
+def known_presets():
+    """能用的预设名 = py/blender/presets/*.json ∪ 三个老脚本式预设。
+
+    ★ R03：以前 `--preset` 拼错没有校验，animate() 的 _SCRIPTS 兜底
+      会静默跑成 aura/killaura，用户以为「我跑的是 cast」。
+      真名只有一处（这里），cli 校验、film 派发都从它取。
+    """
+    names = {'killaura', 'aura', 'yujian'}
+    try:
+        for fn in os.listdir(os.path.join(BLENDER_DIR, 'presets')):
+            if fn.endswith('.json'):
+                names.add(fn[:-5])
+    except OSError:
+        pass
+    return names
+
+
 def animate(blender_exe, blend, out_dir, total=240, fps=24, kind='aura',
             preview=None, progress=print):
     """在封面工程上做动画（默认杀戮光环）。
@@ -1036,7 +1120,14 @@ def animate(blender_exe, blend, out_dir, total=240, fps=24, kind='aura',
         except Exception:
             blend_name = None
     else:
-        script = os.path.join(BLENDER_DIR, _SCRIPTS.get(kind, 'animate_aura.py'))
+        # ★ R03：真脚本表里没有的 kind，宁可报错也不悄悄跑成 aura。
+        script_name = _SCRIPTS.get(kind)
+        if not script_name:
+            raise RuntimeError(
+                '没有这个预设：%s（可用：%s）\n'
+                '新增一支动画 = 加一份 py/blender/presets/<名>.json'
+                % (kind, '、'.join(sorted(known_presets()))))
+        script = os.path.join(BLENDER_DIR, script_name)
     os.makedirs(out_dir, exist_ok=True)
     out_dir = os.path.abspath(out_dir)      # 同上：相对路径 Blender 会写不进去
     args = [blender_exe, '-b', *gpu_args(), blend, '--python', script, '--',

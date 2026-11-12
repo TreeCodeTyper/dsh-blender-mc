@@ -481,15 +481,15 @@
     "az": [
       [
         1,
-        82.0
+        286.0
       ],
       [
         40,
-        74.0
+        278.0
       ],
       [
         120,
-        64.0
+        268.0
       ]
     ],
     "dist": [
@@ -532,7 +532,7 @@
     "key_step": 2
   },
   "stage": {
-    "hide_world": true,
+    "hide_world": false,
     "hide_held": true,
     "ground": {
       "size": 200,

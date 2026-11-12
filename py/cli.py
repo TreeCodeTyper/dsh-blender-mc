@@ -251,7 +251,11 @@ def cmd_extract(a):
         with open(a.json, 'w', encoding='utf-8') as f:
             json.dump(m, f, ensure_ascii=False, indent=2)
         print(f'\n已写 {a.json}')
-    return 0 if m.get('count') else 1
+    # ★ B15 修复：目录里一个 geo.json 都没有 = 「转换了 0 个模型」，
+    #   不是失败。以前返回 1，脚本里 set -e 会直接中断，很坑。
+    if not m.get('count'):
+        print('转换了 0 个模型（目录里没有 *.geo.json）')
+    return 0
 
 
 def cmd_scan(a):
@@ -285,18 +289,29 @@ def cmd_camera_path(a):
     w = World(a.save)
     print(f'相机路径: ({st[0]},{st[1]}) -> ({gl[0]},{gl[1]})')
     top = surface_map(w, x0, x1, z0, z1, y0=a.y[0], y1=a.y[1])
+    info = {}
     pts = plan_camera_path(top, st, gl, bounds=(x0, x1, z0, z1),
-                           samples_per_seg=a.samples, height_offset=a.height)
+                           samples_per_seg=a.samples, height_offset=a.height,
+                           snap_radius=getattr(a, 'snap_radius', 6), info=info)
     data = {'start': list(st), 'goal': list(gl), 'points': pts}
+    if info.get('snap'):
+        s = info['snap']['start']
+        g = info['snap']['goal']
+        data['snapped'] = info['snap']
+        print('吸附：起点 -> (%.0f,%.0f) 偏 %.1f 格，终点 -> (%.0f,%.0f) 偏 %.1f 格'
+              % (s[0], s[1], s[2], g[0], g[1], g[2]))
     print(f'路径点: {len(pts)}')
+    if info.get('error'):
+        print('!! ' + info['error'])
+        data['error'] = info['error']
     if a.out:
         os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
         with open(a.out, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         print(f'已写 {a.out}')
-    else:
+    elif not info.get('error'):
         print(json.dumps(data, ensure_ascii=False, indent=2))
-    return 0 if pts else 1
+    return 0 if pts else 2
 
 
 def cmd_shoot_search(a):
@@ -326,11 +341,60 @@ def cmd_shoot_search(a):
     return 0
 
 
+def _default_skin():
+    """没给 --skin 时该用哪张皮肤。
+
+    ★ B01 修复（2026-11-11）：
+      以前不传 --skin 就完全不动，build_cover 于是沿用 BPS 骨架包里
+      自带的那张 Steve.png —— 那是「经典短袖」变体（袖子只到肘），
+      渲染出来手臂下半截全是裸肤、看着像贴图错位。
+      这里主动解析皮肤库的默认皮肤，让「不传参数」也有确定行为。
+    """
+    home = os.environ.get('DSH_HOME') or os.path.join(
+        os.environ.get('USERPROFILE') or os.path.expanduser('~'), '.dsh')
+    sdir = os.path.join(home, 'blender-mc', 'skins')
+    idx = os.path.join(home, 'blender-mc', 'index.json')
+    cands = []
+    try:
+        with open(idx, 'r', encoding='utf-8') as f:
+            _j = json.load(f)
+        _sk = _j.get('skins') or {}
+        _sid = _sk.get('defaultId') or ''
+        if _sid:
+            cands.append(os.path.join(sdir, _sid + '.png'))
+    except Exception:
+        pass
+    cands.append(os.path.join(sdir, 'default.png'))
+    for c in cands:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
 def cmd_shoot(a):
     from pipeline import shoot
     if not _need_save(a.save):
         return 1
+    # ★ R04：pose/face 拼错以前被 build_cover 的 `POSES.get(name) or POSES['action']`
+    #   静默吃掉（rc 还是 0，出的图看着「没问题」）。枚举型参数一律先校验。
+    _poses = ('action', 'hero', 'raise', 'guard', 'snapshot', 'run', 'jump',
+              'point', 'wave', 'sit', 'legacy')
+    _faces = ('auto', 'happy', 'angry', 'sad', 'surprised', 'curious',
+              'neutral', 'blink', '0')
+    bad = None
+    if a.pose and a.pose.lower() not in _poses:
+        bad = ('--pose', a.pose, _poses)
+    elif a.face is not None and str(a.face).lower() not in _faces:
+        bad = ('--face', a.face, _faces)
+    if bad:
+        print('❌ %s 不支持：%s' % (bad[0], bad[1]))
+        print('   可用：%s' % '、'.join(bad[2]))
+        return 2
     skin = getattr(a, 'skin', None)
+    if not skin:
+        skin = _default_skin()
+        if skin:
+            print(f'皮肤: 未指定，用皮肤库默认 {skin}')
     if skin:
         # 皮肤认「绝对路径」或「皮肤库里的名字」；build_cover.py 直接读 DSH_SKIN
         path = skin
@@ -477,6 +541,8 @@ def cmd_ai_char(a):
     with open(spec_path, 'w', encoding='utf-8', newline='\n') as f:
         json.dump(spec, f, ensure_ascii=False, indent=2)
     print(summarize(spec))
+    for _w in (spec.get('warnings') or []):
+        print('⚠️  ' + _w)
     print('spec:', spec_path)
     if a.spec_only:
         return 0
@@ -581,13 +647,24 @@ def cmd_map_import(a):
 
 
 def cmd_anim(a):
-    from pipeline import animate, find_blender
+    from pipeline import animate, find_blender, known_presets
     if not os.path.isfile(a.blend):
         print('❌ 找不到 .blend 工程: %s' % a.blend)
         print('   先把封面渲出来（shoot），工程就在输出目录里: <out>/尝试1/封面_世界.blend')
         return 1
     b = find_blender(a.blender)
+    # ★ R09：地面动作预设早先默认「隐藏地形、铺棋盘地面」，导致 cast/block
+    #   这类片子背景一片黑（0 分分镜）。现在配方默认保留真实地形，
+    #   要棚拍就显式 --studio（或配方里写 stage.hide_world: true）。
+    if getattr(a, 'studio', False):
+        os.environ['DSH_ANIM_HIDE_WORLD'] = '1'
     preset = getattr(a, 'preset', 'killaura')
+    # ★ R03：拼错的预设以前会静默跑成 killaura/aura；这里先挡住。
+    if preset and preset not in known_presets():
+        print('❌ 没有这个预设：%s' % preset)
+        print('   可用：%s' % '、'.join(sorted(known_presets())))
+        print('   配方在 py/blender/presets/<名>.json；新增一支 = 加一个 json')
+        return 2
     frames, fps = a.frames, a.fps
     if frames is None:
         # 配方自己声明了 duration 就照它来，否则退回 240（老预设的行为）
@@ -731,9 +808,14 @@ def cmd_runs(a):
     import runs
     act = a.action
     if act == 'dir':
-        print(runs.runs_dir())
-        return 0
+        d = runs.runs_dir()
+        print(d or '（不可用：没有可写的目录，设 DSH_RUNS_DIR=<路径>）')
+        return 0 if d else 2
     if act == 'list':
+        if not runs.runs_dir():
+            print('❌ 任务档案不可用：没有可写的目录。')
+            print('   设环境变量 DSH_RUNS_DIR=<可写目录> 后重试（不影响出图/出片）。')
+            return 2
         rows = runs.listing(limit=a.limit)
         if not rows:
             print('（还没有档案）')
@@ -750,6 +832,9 @@ def cmd_runs(a):
     if not rid:
         print('❌ 要给档案 id（先 runs list 看）')
         return 1
+    if not runs.runs_dir() and not os.path.isfile(rid):
+        print('❌ 任务档案不可用：没有可写的目录。设 DSH_RUNS_DIR=<可写目录> 后重试。')
+        return 2
     rec = runs.load(rid)
     if act == 'show':
         print(json.dumps(rec, ensure_ascii=False, indent=2))
@@ -867,6 +952,8 @@ def main():
     cp.add_argument('--y', type=_pair_int, default=(50, 200))
     cp.add_argument('--height', type=float, default=2.5)
     cp.add_argument('--samples', type=int, default=8)
+    cp.add_argument('--snap-radius', type=int, default=6,
+                    help='起终点吸附到可站地面的最大格数（默认 6）')
     cp.add_argument('--out', default=None)
     cp.set_defaults(func=cmd_camera_path)
 
@@ -975,6 +1062,8 @@ def main():
                         'py/blender/presets/ 的任意 <名字>.json（写配方即出新动画，不用改代码）')
     n.add_argument('--prompt', default=None,
                    help='自然语言提示词；给了就按提示词选预设，覆盖 --preset')
+    n.add_argument('--studio', action='store_true',
+                   help='棚拍档：隐藏真实地形、铺棋盘地面（默认保留地形）')
     n.set_defaults(func=cmd_anim)
 
     f = sub.add_parser('film', help='分镜表 → 多镜头 → 剪成一支成片（含分镜表.md）')

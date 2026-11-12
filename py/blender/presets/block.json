@@ -379,11 +379,11 @@
     "az": [
       [
         1,
-        76.0
+        289.0
       ],
       [
         96,
-        68.0
+        281.0
       ]
     ],
     "dist": [
@@ -418,7 +418,7 @@
     "key_step": 2
   },
   "stage": {
-    "hide_world": true,
+    "hide_world": false,
     "hide_held": true,
     "ground": {
       "size": 200,
