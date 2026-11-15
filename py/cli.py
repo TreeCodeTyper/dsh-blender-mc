@@ -695,15 +695,30 @@ def cmd_anim(a):
               % (preset, frames, fps, spec['res']))
         for w in spec.get('warnings') or []:
             print('⚠️  ' + w)
+    # ★ 0.6.2：渲染参数现场可覆盖（以前只能改配方 json）
+    if getattr(a, 'fast', False):
+        os.environ['DSH_ANIM_RES'] = '960x540'
+        os.environ['DSH_ANIM_SAMPLES'] = '8'
+    if getattr(a, 'res', None):
+        os.environ['DSH_ANIM_RES'] = a.res
+    if getattr(a, 'samples', None):
+        os.environ['DSH_ANIM_SAMPLES'] = str(a.samples)
+    if getattr(a, 'composite', False):
+        os.environ['DSH_ANIM_COMPOSITE'] = '1'
+    if getattr(a, 'no_video', False):
+        os.environ['DSH_ANIM_NOMP4'] = '1'
     r = animate(b, a.blend, a.out, total=frames, fps=fps,
                 kind=preset,
                 preview=a.preview, progress=print)
     print(f"\n动画工程: {r['blend']}")
     if r.get('frames'):
         print(f"帧序列: {r['frames']} 帧 @ {r['fps']}fps → {r['dir']}")
-        print('\n转视频:')
-        print(f'  ffmpeg -framerate {r["fps"]} -i "{r["dir"]}\\frame_%04d.png" '
-              f'-c:v libx264 -crf 18 -pix_fmt yuv420p -movflags +faststart out.mp4')
+        if r.get('mp4'):
+            print(f"成片: {r['mp4']}")
+        else:
+            print('\n转视频（自动合成没成功时手动跑）:')
+            print(f'  ffmpeg -framerate {r["fps"]} -i "{r["dir"]}\\frame_%04d.png" '
+                  f'-c:v libx264 -crf 18 -pix_fmt yuv420p -movflags +faststart out.mp4')
     return 0
 
 
@@ -1062,6 +1077,18 @@ def main():
                         'py/blender/presets/ 的任意 <名字>.json（写配方即出新动画，不用改代码）')
     n.add_argument('--prompt', default=None,
                    help='自然语言提示词；给了就按提示词选预设，覆盖 --preset')
+    n.add_argument('--res', default=None,
+                   help='分辨率，如 960x540 / 1280x720（默认用配方里的）')
+    n.add_argument('--samples', type=_posint, default=None,
+                   help='EEVEE TAA 采样数（默认 32；无合成器时 8~16 已看不出差别）')
+    n.add_argument('--fast', action='store_true',
+                   help='快档：960x540 / 8 采样（试镜头、预览；'
+                        '10 秒片子约 1.5 分钟）')
+    n.add_argument('--composite', action='store_true',
+                   help='保留 Blender 内合成器（默认搬到 ffmpeg，'
+                        '每帧少约 0.6 秒）')
+    n.add_argument('--no-video', action='store_true',
+                   help='只出帧序列，不合成 MP4')
     n.add_argument('--studio', action='store_true',
                    help='棚拍档：隐藏真实地形、铺棋盘地面（默认保留地形）')
     n.set_defaults(func=cmd_anim)

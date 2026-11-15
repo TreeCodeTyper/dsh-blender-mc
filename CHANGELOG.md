@@ -6,6 +6,43 @@
 
 ---
 
+## [0.6.2] - 2026-11-15
+
+**出片 4.6 分钟 → 2 分钟（10 秒 240 帧），4 秒片子 1 分钟出片并直接给 MP4；
+出图 2 轮误判修掉（每次少渲一整轮）。**
+
+### 性能：动画（视频）
+
+- **合成器搬到 ffmpeg**：Blender 的溢光/调色/暗角以前每帧要 0.6 秒（占每帧 60%），
+  现在导出 `_post.json`、由 ffmpeg 复刻同一条链（`split → colorlevels+gblur → blend addition
+  → eq 饱和 → vignette`），每帧降到 0.41–0.51 秒。逐像素对比：全图/天空/地面平均色差 1–3 级。
+- **同进程渲完整个序列**：`anim_kit.render_sequence()` 在建模那个 Blender 进程里直接
+  逐帧渲染，不再起第二个 `blender -b -a`（少一次 13 秒冷启）。
+  实测 96 帧 540p/16：61 秒（原 2 进程 + 合成器约 4.6 分钟/10 秒量级）。
+- **自动合成 MP4**：`pipeline.animate()` 渲完直接编码 `<out>/动画.mp4`（libx264 crf18 /
+  yuv420p / +faststart），不再只打印 ffmpeg 命令。
+- `anim` 子命令新增 `--fast`（960x540/8）、`--res`、`--samples`、`--composite`
+  （保留 Blender 合成器，用于要和旧片逐像素对齐的场合）、`--no-video`；
+  对应 mc_anim 工具参数 `fast/res/samples/composite/no_video`。
+- `mc_film` 每镜编码时读该镜的 `_post.json` 补上调色，画面不再因为合成器搬走而掉色。
+
+### 修复
+
+- **`_subject_box.json` 一直是 0 字节**（`build_cover.py` 里种树函数的 `_probe` 覆盖了
+  朝向全局，`float(_probe[0])` 抛 `TypeError: 'function' object is not subscriptable`，
+  而文件已被截断）→ 审图退回「按颜色猜主体」，误判「脚没踩地 / 主体偏小 / 没有景深」，
+  白跑一整轮渲染还可能终判 FAIL。改为 `FACING_DEG` + `_probe_tree_spot` 两个名字，
+  并用 `_atomic_json()` 先序列化再落盘。同一参数由「两轮 FAIL 44、终判 FAIL」变成
+  「WARN 64 → PASS 94、定稿 PASS 86」，48.6 秒收工。
+
+### 已知上限
+
+- 每帧地板 ~0.41 秒（540p）/ ~0.51 秒（720p），每个 Blender 进程冷启 ~13 秒；
+  压测过：多进程并行**更慢**（GPU 独占），采样数在无合成器后几乎没有影响，
+  运动模糊成本≈0。所以 60 秒内只能出 4–5 秒的片子，10 秒片子约 2 分钟。
+
+---
+
 ## [0.6.1] - 2026-11-12
 
 **出图 111 秒 → 38.6 秒；背景可选「干净档」；动画多 6 支动作 + 一套运镜 DSL；每次跑完自动落任务档案。**

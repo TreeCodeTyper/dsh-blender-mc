@@ -59,6 +59,11 @@ res = anim_kit.build(recipe, OUT, TOTAL, FPS)
 if PREVIEW:
     frames = [int(x) for x in PREVIEW.split(',') if x.strip()]
     anim_kit.render_preview(res, frames)
+elif os.environ.get('DSH_ANIM_INPROC', '1') != '0':
+    # ★ 0.6.2：同进程直接渲完整段 —— 第二个 Blender 进程的光冷启（12–16s）
+    #   和重新加载 .blend 全部省掉。DSH_ANIM_INPROC=0 回到老行为。
+    print('\n[8] 同进程渲整段帧序列（省掉第二次 Blender 启动）')
+    anim_kit.render_sequence(res)
 else:
     print('\n[8] 用 blender -b 渲染序列（不在本脚本内做）')
     print('    blender -b "%s" -a' % res['blend'])

@@ -34,6 +34,7 @@ import math
 import os
 import random
 import sys
+import time
 
 import bpy
 import mathutils as mu
@@ -1264,6 +1265,11 @@ def setup_render(ctx, r, out_dir):
     sc.render.resolution_percentage = 100
     sc.render.image_settings.file_format = 'PNG'
     sc.render.film_transparent = False
+    # 同进程连渲多帧时省掉重复的场景重建（实测 1.24 → 1.19s/帧，顺带稳）
+    try:
+        sc.render.use_persistent_data = True
+    except Exception:
+        pass
     try:
         sc.eevee.taa_render_samples = samples
     except Exception:
@@ -1332,6 +1338,26 @@ def setup_render(ctx, r, out_dir):
                 hidden += 1
         if hidden:
             p('    已关闭体积雾盒 %d 个（升空后会把天空糊成灰）' % hidden)
+
+    # ★★★ 0.6.2：合成器搬去 ffmpeg（每帧约省 60%）★★★
+    #   实测 960x540/16：带合成器 1.01–1.05s/帧，关掉 0.41s/帧。
+    #   其中 Glare(Bloom) 0.37s、调色+180px 暗角 0.26s —— 全是纯 2D 后期，
+    #   ffmpeg 整段一次过完比 Blender 每帧算一遍快两个数量级。
+    #   这里只把参数读出来写 _post.json，渲完由 pipeline 出 MP4 时套上。
+    #   想回到「Blender 内合成」：DSH_ANIM_COMPOSITE=1。
+    try:
+        import anim_post
+        post = anim_post.collect(sc, log=p)
+        anim_post.write(out_dir, post)
+        if os.environ.get('DSH_ANIM_COMPOSITE', '0') == '1':
+            p('    合成器: 保留（DSH_ANIM_COMPOSITE=1，每帧多约 0.6s）')
+        else:
+            if sc.render.use_compositing:
+                sc.render.use_compositing = False
+            p('    合成器: 移到 ffmpeg 后处理（%s）→ 每帧约省 60%%'
+              % anim_post.describe(post))
+    except Exception as e:
+        p('    !! 后处理参数导出失败（合成器保持原样）: %s' % e)
 
     sc.render.filepath = os.path.join(out_dir, r.get('frame_prefix', 'frame_'))
     p('    %s / %d 采样 / %s / %d 帧 @ %dfps / %s'
@@ -1837,6 +1863,38 @@ def render_preview(res, frames):
         bpy.ops.render.render(write_still=True)
         p('    帧 %d 完成' % f)
     sc.render.filepath = os.path.join(res['out'], 'frame_')
+
+
+def render_sequence(res, every=24):
+    """在【同一个 Blender 进程】里把整段帧渲完。
+
+    ★ 为什么不再起第二个进程：每个 Blender 进程冷启要 12–16s
+      （着色器编译 + 探针烘焙，与分辨率/采样无关），第二个进程还得重新
+      加载 .blend。同进程接着渲等于白捡十几秒，1–2 分钟的片子就是从
+      「两分半」掉进「一分钟」的那一刀。
+    """
+    sc = res['ctx']['sc']
+    out = res['out']
+    total = int(res['total'])
+    keep = sc.render.filepath
+    sc.frame_start, sc.frame_end = 1, total
+    t0 = time.time()
+    t_first = 0.0
+    for f in range(1, total + 1):
+        sc.frame_set(f)
+        sc.render.filepath = os.path.join(out, 'frame_%04d' % f)
+        bpy.ops.render.render(write_still=True)
+        if f == 1:
+            t_first = time.time() - t0
+        if f % max(1, int(every)) == 0 or f == total:
+            el = time.time() - t0
+            p('    帧 %d/%d  %.1fs（首帧 %.1fs，之后 %.2fs/帧）'
+              % (f, total, el, t_first, (el - t_first) / max(1, f - 1)))
+    sc.render.filepath = keep
+    el = time.time() - t0
+    p('    帧序列完成: %d 帧 / %.1fs（%.2f 帧/秒）' % (total, el, total / max(0.01, el)))
+    p('INPROC_DONE frames=%d seconds=%.1f' % (total, el))
+    return el
 
 
 def write_log(out_dir):

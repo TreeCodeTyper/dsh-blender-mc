@@ -349,6 +349,13 @@ if PREVIEW:
         sc.render.filepath = os.path.join(OUT, f"preview_{f:04d}")
         bpy.ops.render.render(write_still=True)
         p(f"    帧 {f} 完成")
+elif os.environ.get('DSH_ANIM_INPROC', '1') != '0':
+    # 0.6.2: compositor -> ffmpeg post, and render the whole range in this same
+    # process (skips the second Blender cold start + .blend reload).
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import anim_post
+    anim_post.setup_ffmpeg_post(sc, OUT, log=p)
+    anim_post.render_all(sc, OUT, TOTAL, log=p)
 else:
     p("\n[5] 用 blender -b 渲染动画序列（不在本脚本内做）")
     p(f"    blender -b \"{blend}\" -a")

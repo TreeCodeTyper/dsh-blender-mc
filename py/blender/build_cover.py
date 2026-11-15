@@ -1056,6 +1056,21 @@ else:
 #
 #   判据：后脑方向 (head − face) 与「主体 → 相机」方向的夹角 ang，
 #   ang 小 = 正对镜头。目标取 25°~40°（正中会显得证件照，留点 3/4 侧脸）。
+def _atomic_json(path, payload):
+    """先序列化成字符串再写盘。
+
+    ★ 为什么不用 json.dump(f, ...)：dump 会先把文件 open('w') 截断，
+      中途抛异常（比如 facing_deg 那行）就留下一个 0 字节的 _subject_box.json，
+      下游审图读到空文件 → 退回按颜色猜主体 → 误判 FAIL → 白烧一整轮渲染。
+    """
+    txt = json.dumps(payload, ensure_ascii=False, indent=2)
+    _d = os.path.dirname(path)
+    if _d:
+        os.makedirs(_d, exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(txt)
+
+
 def _facing_probe(yaw_deg):
     """把角色转到 yaw_deg，量出「面部→相机夹角」。返回 (ang, tag) 或 None。"""
     arm.rotation_euler = (0, 0, math.radians(yaw_deg))
@@ -1078,16 +1093,22 @@ def _facing_probe(yaw_deg):
     return ang, tag
 
 
+# ★ 朝向量测值放独立全局名。0.6.1 之前叫 _probe，结果被下面种树那段里的
+#   `def _probe(...)` 覆盖成函数（模块级缩进，真绑定全局），写 _subject_box.json
+#   时 float(_probe[0]) 抛 TypeError → 文件已被截断成 0 字节 → 审图退回按颜色
+#   找主体 → 误判「脚没踩地/主体偏小」整轮 FAIL，白烧一次渲染。
+FACING_DEG = None
+
 if arm:
     _yaw_orig = YAW
     _face_obj = next((o for o in char if 'mesh face' in o.name.lower()), None)
     _head_obj = next((o for o in char if o.name.lower().endswith('mesh head')), None)
     if _face_obj and _head_obj:
-        _probe = _facing_probe(YAW)
-        if _probe is None:
+        _facing = _facing_probe(YAW)
+        if _facing is None:
             p("    !! 面部/头部包围盒取不到，跳过朝向搜索")
         else:
-            p(f"    朝向搜索前：yaw={YAW:.0f}° 夹角 {_probe[0]:.0f}° → {_probe[1]}")
+            p(f"    朝向搜索前：yaw={YAW:.0f}° 夹角 {_facing[0]:.0f}° → {_facing[1]}")
             # 全周扫描（每 3°）直接挑「夹角最接近 45°」的那个 —— 45° 是标准的
             # 3/4 侧脸，脸看得见、举起的右手也不会挡在脸前面（正中 15° 会挡）。
             _cands = [(a, _facing_probe(a)) for a in range(0, 360, 3)]
@@ -1102,11 +1123,11 @@ if arm:
                 _tgt_ang = max(0.0, min(90.0, _tgt_ang))
                 YAW = min(_cands, key=lambda t: abs(t[1][0] - _tgt_ang))[0]
                 _after = _facing_probe(YAW)
-                # ★ B05：把 _probe 更新成「搜完之后」的量测值。
-                #   以前 _probe 一直停留在搜索【之前】的 yaw 上，
+                # ★ B05：把朝向量测值更新成「搜完之后」的。
+                #   以前它一直停留在搜索【之前】的 yaw 上，
                 #   写进 _subject_box.json 的 facing_deg 是错的（实测填 135°，
                 #   但成图明明是 3/4 正面），审图交叉校验被它带偏。
-                _probe = _after
+                FACING_DEG = _after[0]
                 p(f"    ★ 朝向搜索：yaw {YAW:.0f}°  夹角 {_after[0]:.0f}° → "
                   f"{_after[1]}（相机方位 {CAM_AZ:.0f}°，太阳 {SUN_ROT:.0f}°，"
                   f"扫了 {len(_cands)} 个候选）")
@@ -2677,7 +2698,7 @@ if TREES_N > 0:
                   + mathutils.Vector((0.0, 0.0, CAM_H)))
             return f, r, cp
 
-        def _probe(az_deg, want, seed):
+        def _probe_tree_spot(az_deg, want, seed):
             """按【画面里的像素位置】撒点，返回能种树的地面点。
 
             ★ 用户原话「背景看不出来有森林的样子」：105mm 长焦水平视角只有 ~19°，
@@ -2749,7 +2770,7 @@ if TREES_N > 0:
         #   实测直接把镜头转到土崖上（1360 万像素全是墙，主体缩成一角、审图 FAIL 38）。
         #   现在机位固定：能种几棵种几棵，不够只告警。
         _PROBE_TRIES = []
-        _spots = _probe(CAM_AZ, TREES_N, 2603 + TREES_N)
+        _spots = _probe_tree_spot(CAM_AZ, TREES_N, 2603 + TREES_N)
         rnd = _random.Random(2603 + TREES_N)
         _fwd, _rgt, cam_p = _basis(CAM_AZ)
         p(f"    机位参考 {tuple(round(v, 1) for v in cam_p)}（只种挡不住的树）")
@@ -3706,20 +3727,20 @@ else:
 for _n in _head_notes:
     p(f"    ⚠️ 头部框: {_n}")
 try:
-    with open(os.path.join(OUT, '_subject_box.json'), 'w', encoding='utf-8') as f:
-        json.dump({'subject_box': _subject_box, 'raw': _subject_raw,
+    _atomic_json(os.path.join(OUT, '_subject_box.json'),
+                 {'subject_box': _subject_box, 'raw': _subject_raw,
                    'head_box': _head_box, 'head_notes': _head_notes,
                    'size': [RES_X, RES_Y],
                    # ★ B05 修复：把几何朝向一并交给审图。
                    #   审图靠「头部皮肤色占比」判正/背面，对脸不是肤色的皮肤
                    #   （紫发白袍、金发、面具）会误判成背面。几何这里有真值，
                    #   让审图拿它做交叉校验，而不是各说各话。
-                   'facing_deg': (round(float(_probe[0]), 1)
-                                  if ('_probe' in globals() and _probe) else None),
+                   'facing_deg': (round(float(FACING_DEG), 1)
+                                  if FACING_DEG is not None else None),
                    'yaw': round(float(YAW), 1),
                    'cam_az': round(float(CAM_AZ), 1),
                    'source': 'world_to_camera_view(body eval_bbox)',
-                   'notes': _subject_notes}, f, ensure_ascii=False, indent=2)
+                   'notes': _subject_notes})
 except Exception as e:
     p(f"    ⚠️ 写 _subject_box.json 失败: {e}")
 
@@ -3754,16 +3775,16 @@ def _emit_box_json(directory, rx, ry):
         RES_X, RES_Y = old
     try:
         os.makedirs(directory, exist_ok=True)
-        with open(os.path.join(directory, '_subject_box.json'), 'w', encoding='utf-8') as f:
-            json.dump({'subject_box': box, 'raw': raw, 'head_box': hb,
+        _atomic_json(os.path.join(directory, '_subject_box.json'),
+                     {'subject_box': box, 'raw': raw, 'head_box': hb,
                        'head_notes': hnotes, 'size': [int(rx), int(ry)],
                        # ★ B05：几何朝向（度）一并写下去，供审图交叉校验
-                       'facing_deg': (round(float(_probe[0]), 1)
-                                      if ('_probe' in globals() and _probe) else None),
+                       'facing_deg': (round(float(FACING_DEG), 1)
+                                      if FACING_DEG is not None else None),
                        'yaw': round(float(YAW), 1),
                        'cam_az': round(float(CAM_AZ), 1),
                        'source': 'world_to_camera_view(body eval_bbox)',
-                       'notes': notes}, f, ensure_ascii=False, indent=2)
+                       'notes': notes})
     except Exception as e:
         p(f"    ⚠️ 写 _subject_box.json 失败: {e}")
 

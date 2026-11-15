@@ -233,12 +233,29 @@ def _stitch_with_transitions(ffmpeg, segments, shots, out_dir, plan, fps, res,
     for k, (s, d, frames) in enumerate(segments):
         start = int(shots[k]['range'][0])
         mp4_k = os.path.join(work, 'seg_%02d_%s.mp4' % (k, s['id']))
-        rc, out = pipeline.run([
-            ffmpeg, '-y', '-framerate', '%g' % fps,
-            '-start_number', str(start),
-            '-i', os.path.join(d, 'frame_%04d.png'),
-            '-c:v', 'libx264', '-crf', crf, '-pix_fmt', 'yuv420p',
-            '-r', '%g' % fps, mp4_k], log=os.path.join(d, '_seg_encode.log'))
+        # ★ 0.6.2：建工程时已把合成器搬到 ffmpeg（每帧省 60%），
+        #   这里用镜头目录里的 _post.json 把调色/溢光/暗角补回来。
+        _post = None
+        try:
+            import sys as _sys
+            if pipeline.BLENDER_DIR not in _sys.path:
+                _sys.path.insert(0, pipeline.BLENDER_DIR)
+            import anim_post as _ap
+            _post = _ap.load(d)
+        except Exception as _e:
+            progress('    ⚠️  %s 没读到 _post.json（%s），画面将不带调色'
+                     % (s['id'], _e))
+        _args = [ffmpeg, '-y', '-framerate', '%g' % fps,
+                 '-start_number', str(start),
+                 '-i', os.path.join(d, 'frame_%04d.png')]
+        if _post:
+            try:
+                _args += ['-filter_complex', _ap.filter_chain(_post), '-map', '[out]']
+            except Exception as _e:
+                progress('    ⚠️  %s 后处理链失败（%s）' % (s['id'], _e))
+        _args += ['-c:v', 'libx264', '-crf', crf, '-pix_fmt', 'yuv420p',
+                  '-r', '%g' % fps, mp4_k]
+        rc, out = pipeline.run(_args, log=os.path.join(d, '_seg_encode.log'))
         if rc != 0:
             raise RuntimeError('镜头 %s 编码失败\n%s' % (s['id'], out[-1200:]))
         inputs.append(mp4_k)

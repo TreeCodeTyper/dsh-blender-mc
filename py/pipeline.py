@@ -1152,16 +1152,61 @@ def animate(blender_exe, blend, out_dir, total=240, fps=24, kind='aura',
         _archive_anim(kind, blend, out_dir, total, fps, res, preview=True,
                       progress=progress)
         return res
-    rc, out = run([blender_exe, '-b', *gpu_args(), ablend, '-a'],
-                  log=os.path.join(out_dir, '_render.log'))
+
+    # ★ 0.6.2：新脚本在【同一个 Blender 进程】里就把帧序列渲完了
+    #   （animate_recipe.py 的 render_sequence / anim_post.render_all）。
+    #   帧已经齐就不再起第二个 Blender——那一步纯粹是冷启 12–16s
+    #   加一次 .blend 重载，一帧都不多出。旧脚本（DSH_ANIM_INPROC=0）
+    #   仍然走老路子：数不够就补起一个进程。
     n = len([f for f in os.listdir(out_dir) if f.startswith('frame_')])
-    if n == 0:
-        raise RuntimeError(f'动画渲染没出帧\n{out[-2000:]}')
-    progress(f'    渲染 {n} 帧')
-    res = {'blend': ablend, 'frames': n, 'dir': out_dir, 'fps': fps}
+    if n >= int(total or 0):
+        progress(f'    同进程已渲完 {n} 帧，跳过第二次 Blender 启动')
+    else:
+        if n:
+            progress(f'    同进程出了 {n}/{total} 帧，起第二个进程补齐')
+        rc, out = run([blender_exe, '-b', *gpu_args(), ablend, '-a'],
+                      log=os.path.join(out_dir, '_render.log'))
+        n = len([f for f in os.listdir(out_dir) if f.startswith('frame_')])
+        if n == 0:
+            raise RuntimeError(f'动画渲染没出帧\n{out[-2000:]}')
+        progress(f'    渲染 {n} 帧')
+
+    # ③ 合成视频（以前只打印一条 ffmpeg 命令让用户自己敲）
+    mp4 = None
+    try:
+        if os.environ.get('DSH_ANIM_NOMP4') == '1':
+            progress('    跳过合成（--no-video）')
+        else:
+            mp4 = _encode_anim(out_dir, fps, int(total or n), progress=progress)
+    except Exception as e:
+        progress(f'    ⚠️  合成 MP4 失败（帧序列仍然可用）: {e}')
+
+    res = {'blend': ablend, 'frames': n, 'dir': out_dir, 'fps': fps, 'mp4': mp4}
     _archive_anim(kind, blend, out_dir, total, fps, res, preview=False,
                   progress=progress)
     return res
+
+
+def _encode_anim(out_dir, fps, total, progress=print):
+    """帧序列 → MP4，并把 _post.json 里的溢光/调色/暗角套上。
+
+    ★ 这是 0.6.2 的主力提速手段之一：合成器每帧要 0.6s（占渲染时间
+    60%），搬到 ffmpeg 一次性过完只要 1–3 秒，观感几乎无差。
+    """
+    sys.path.insert(0, BLENDER_DIR)
+    import anim_post
+    ff = resolve_assets({}).get('ffmpeg') or 'ffmpeg'
+    post = anim_post.load(out_dir)
+    mp4 = os.path.join(out_dir, '动画.mp4')
+    args = anim_post.ffmpeg_args(ff, out_dir, fps, mp4, post=post, total=total)
+    t0 = time.time()
+    rc, out = run(args, log=os.path.join(out_dir, '_encode.log'))
+    if rc != 0 or not os.path.exists(mp4):
+        raise RuntimeError((out or '')[-1500:] or 'ffmpeg 没生成文件')
+    progress('    合成 %s（%d 帧 / %.1fs / %.1f MB）'
+             % (os.path.basename(mp4), total, time.time() - t0,
+                os.path.getsize(mp4) / 1e6))
+    return mp4
 
 
 def _archive_anim(kind, blend, out_dir, total, fps, res, preview=False,

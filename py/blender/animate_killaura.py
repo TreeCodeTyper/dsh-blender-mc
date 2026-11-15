@@ -321,5 +321,13 @@ if PREVIEW:
         bpy.ops.render.render(write_still=True)
         p(f"    预览 {f} → preview_{f:04d}.png")
     sc.render.filepath = os.path.join(OUT, 'frame_')
+elif os.environ.get('DSH_ANIM_INPROC', '1') != '0':
+    # 0.6.2: compositor -> ffmpeg post, and render the whole range in this same
+    # process (skips the second Blender cold start + .blend reload).
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import anim_post
+    anim_post.setup_ffmpeg_post(sc, OUT, log=p)
+    anim_post.render_all(sc, OUT, TOTAL, log=p)
+
 
 open(os.path.join(OUT, '_动画日志.txt'), 'w', encoding='utf-8').write('\n'.join(L))
