@@ -356,6 +356,10 @@ def film(blender_exe, plan, out_dir, animatic=False, progress=print):
             progress('  %s 换工程：%s' % (s['id'], os.path.basename(shot_blend)))
         env = os.environ.copy()
         env.update(s['env'])
+        # ★ 0.6.2：建镜工程时只要 .blend，不要预先渲序列。
+        #   animate_recipe 现在默认同进程渲完整条序列；不关掉会先渲 240 帧再被
+        #   本函数按 range 重渲一遍（既浪费又把帧数统计搞乱）。
+        env['DSH_ANIM_INPROC'] = '0'
         key_r, key_s = PRESET_ENV_RES.get(preset, ('', ''))
         if is_recipe:
             key_r, key_s = 'DSH_ANIM_RES', 'DSH_ANIM_SAMPLES'
@@ -456,11 +460,27 @@ def film(blender_exe, plan, out_dir, animatic=False, progress=print):
                  % (seq, fps, seq, crf, mp4))
         mp4 = None
     elif not has_trans:
-        rc, out = pipeline.run([ffmpeg, '-y', '-framerate', '%g' % fps,
-                                '-i', os.path.join(seq, 'seq_%04d.png'),
-                                '-c:v', 'libx264', '-crf', crf,
-                                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
-                                mp4], log=os.path.join(out_dir, '_ffmpeg.log'))
+        # ★ 0.6.2：全 cut 走这条路（拼 seq 再一次编码），同样要把调色补上，
+        #   否则成片比单镜 mc_anim 出的干净很多。取第一个镜头的 _post.json 即可（同一配方）。
+        _post = None
+        try:
+            import sys as _sys
+            if pipeline.BLENDER_DIR not in _sys.path:
+                _sys.path.insert(0, pipeline.BLENDER_DIR)
+            import anim_post as _ap
+            _post = _ap.load(segments[0][1]) if segments else None
+        except Exception as _e:
+            progress('    ⚠️  没读到 _post.json（%s），成片将不带调色' % _e)
+        _args = [ffmpeg, '-y', '-framerate', '%g' % fps,
+                 '-i', os.path.join(seq, 'seq_%04d.png')]
+        if _post:
+            try:
+                _args += ['-filter_complex', _ap.filter_chain(_post), '-map', '[out]']
+            except Exception as _e:
+                progress('    ⚠️  后处理链失败（%s）' % _e)
+        _args += ['-c:v', 'libx264', '-crf', crf,
+                  '-pix_fmt', 'yuv420p', '-movflags', '+faststart', mp4]
+        rc, out = pipeline.run(_args, log=os.path.join(out_dir, '_ffmpeg.log'))
         if rc != 0:
             raise RuntimeError('ffmpeg 合成失败\n%s' % out[-1500:])
         progress('成片：%s（%.1f MB）' % (mp4, os.path.getsize(mp4) / 1e6))
